@@ -1,0 +1,165 @@
+:root {
+  --bg: #f4f4f5;
+  --card: rgba(255, 255, 255, 0.96);
+  --text: #18181b;
+  --muted: #71717a;
+  --border: #e4e4e7;
+  --accent: #2563eb;
+  --shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #18181b;
+    --card: rgba(30, 30, 34, 0.96);
+    --text: #f4f4f5;
+    --muted: #a1a1aa;
+    --border: #3f3f46;
+    --accent: #60a5fa;
+    --shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+#map { position: absolute; inset: 0; background: var(--bg); }
+
+.card {
+  position: absolute;
+  z-index: 1000;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.hidden { display: none !important; }
+
+#topbar {
+  top: 12px;
+  left: 12px;
+  width: 300px;
+  max-width: calc(100% - 24px);
+  padding: 12px 14px;
+}
+#topbar .title { display: flex; align-items: baseline; justify-content: space-between; }
+h1 { font-size: 18px; margin: 0; }
+#clock { font-variant-numeric: tabular-nums; color: var(--muted); }
+.stats { margin: 4px 0 10px; color: var(--muted); }
+.stats strong { color: var(--text); font-variant-numeric: tabular-nums; }
+
+#search {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+#search:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+#filters { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.chip .dot { width: 9px; height: 9px; border-radius: 50%; }
+.chip .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+.chip.off { opacity: 0.4; }
+
+#panel {
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  width: 340px;
+  max-width: calc(100% - 24px);
+  padding: 16px;
+  overflow-y: auto;
+}
+#close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+#panel h2 { margin: 8px 0 2px; font-size: 20px; }
+.route { color: var(--muted); margin-bottom: 12px; }
+.progress { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; margin: 8px 0 4px; }
+.progress div { height: 100%; }
+.info { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+
+.stops { list-style: none; margin: 0; padding: 0; }
+.stops li {
+  position: relative;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 0 5px 20px;
+}
+.stops li::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 10px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 2px solid var(--c);
+  background: var(--card);
+}
+.stops li::after {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: 22px;
+  bottom: -8px;
+  width: 2px;
+  background: var(--c);
+}
+.stops li:last-child::after { display: none; }
+.stops li.passed { color: var(--muted); }
+.stops li.passed::before { background: var(--c); }
+.stops li.current { font-weight: 600; }
+.stops .time { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+#status {
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  padding: 10px 16px;
+  max-width: calc(100% - 24px);
+}
+
+.leaflet-container { font: inherit; }
+.leaflet-tooltip { font-size: 12px; }
+
+@media (max-width: 640px) {
+  #topbar { width: auto; right: 12px; }
+  #panel { top: auto; left: 12px; right: 12px; bottom: 28px; width: auto; max-height: 55%; }
+}

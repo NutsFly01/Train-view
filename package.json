@@ -1,0 +1,17 @@
+{
+  "name": "train-view",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Carte des trains SNCF en France, positions estimées à partir des horaires théoriques (GTFS).",
+  "type": "module",
+  "scripts": {
+    "data": "node scripts/build-data.mjs",
+    "serve": "node scripts/serve.mjs"
+  },
+  "dependencies": {
+    "fflate": "0.8.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

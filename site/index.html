@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Train View</title>
+  <meta name="description" content="Carte des trains SNCF en France, positions estimées à partir des horaires théoriques.">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <header class="card" id="topbar">
+    <div class="title">
+      <h1>Train View</h1>
+      <span id="clock">--:--:--</span>
+    </div>
+    <div class="stats"><strong id="count">0</strong> trains en circulation</div>
+    <input id="search" type="search" placeholder="N° de train ou gare…" autocomplete="off">
+    <div id="filters"></div>
+  </header>
+
+  <aside class="card hidden" id="panel">
+    <button id="close" aria-label="Fermer">×</button>
+    <div id="panel-content"></div>
+  </aside>
+
+  <div class="card" id="status">Chargement des horaires…</div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
