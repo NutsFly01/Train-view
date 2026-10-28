@@ -776,7 +776,15 @@ async function buildFromFeeds(country, feeds) {
       kept++;
     }
     console.log(`  ${name} : ${kept} courses retenues`);
-    if (shaped.length) addShapeGeometry(zip, shaped, stops, segGeom);
+    if (shaped.length) {
+      // Un shapes.txt illisible (archive tronquée…) ne doit pas faire perdre les horaires :
+      // les tronçons concernés passeront par les voies OSM ou la ligne droite.
+      try {
+        addShapeGeometry(zip, shaped, stops, segGeom);
+      } catch (err) {
+        console.warn(`    tracés GTFS illisibles : ${err.message}`);
+      }
+    }
     if (!kept) {
       // Diagnostic : on indique à quelle étape les courses ont été perdues.
       let calRange = '';
