@@ -59,10 +59,8 @@ const COUNTRIES = [
     flag: '🇨🇭',
     tz: 'Europe/Zurich',
     // Flux national complet (tous modes, très volumineux) : on ne garde que le train.
-    sources: [
-      [`https://opentransportdata.swiss/fr/dataset/timetable-${new Date().getFullYear()}-gtfs2020/permalink`],
-      [`https://opentransportdata.swiss/de/dataset/timetable-${new Date().getFullYear()}-gtfs2020/permalink`],
-    ],
+    // L'horaire annuel change mi-décembre : on essaie l'année en cours puis la suivante.
+    sources: swissSources(),
   },
   {
     id: 'be',
@@ -93,6 +91,17 @@ const COUNTRIES = [
     ],
   },
 ];
+
+function swissSources() {
+  const y = new Date().getFullYear();
+  const out = [];
+  for (const year of [y, y + 1, y - 1]) {
+    for (const base of ['https://data.opentransportdata.swiss/dataset', 'https://data.opentransportdata.swiss/en/dataset', 'https://opentransportdata.swiss/en/dataset']) {
+      out.push([`${base}/timetable-${year}-gtfs2020/permalink`]);
+    }
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Catégories de trains (pour les couleurs et les filtres)
@@ -306,7 +315,12 @@ async function buildCountry(country) {
     readCsv(zip, 'routes.txt', (f, h) => {
       if (keepRoute(Number(col(f, h, 'route_type')))) routes.set(col(f, h, 'route_id'), rowObj(f, h));
     });
-    if (!routes.size) { console.warn(`  ${name} : aucune ligne ferroviaire`); continue; }
+    if (!routes.size) {
+      const typesSeen = {};
+      readCsv(zip, 'routes.txt', (f, h) => { const t = col(f, h, 'route_type'); typesSeen[t] = (typesSeen[t] || 0) + 1; });
+      console.warn(`  ${name} : aucune ligne ferroviaire (route_type présents : ${JSON.stringify(typesSeen)})`);
+      continue;
+    }
 
     // Calendriers -> jours (indices dans `dates`) où chaque service circule.
     const serviceDays = new Map();
@@ -444,6 +458,18 @@ async function buildCountry(country) {
       kept++;
     }
     console.log(`  ${name} : ${kept} courses retenues`);
+    if (!kept) {
+      // Diagnostic : on indique à quelle étape les courses ont été perdues.
+      let calRange = '';
+      readCsv(zip, 'calendar.txt', (f, h) => { if (!calRange) calRange = `${col(f, h, 'start_date')}–${col(f, h, 'end_date')}`; });
+      let firstException = '';
+      readCsv(zip, 'calendar_dates.txt', (f, h) => { if (!firstException) firstException = col(f, h, 'date'); });
+      let firstTrip = '';
+      readCsv(zip, 'trips.txt', (f, h) => { if (!firstTrip) firstTrip = JSON.stringify(rowObj(f, h)); });
+      const withStops = [...feedTrips.values()].filter((t) => t.stops.length >= 2).length;
+      console.warn(`    lignes ferroviaires : ${routes.size}, courses dans la fenêtre ${dates[0]}–${dates.at(-1)} : ${feedTrips.size}, avec horaires : ${withStops}, gares lues : ${rawStops.size}/${usedStopIds.size}`);
+      console.warn(`    exemple calendar : ${calRange || '—'}, calendar_dates : ${firstException || '—'}, trip : ${firstTrip}`);
+    }
   }
 
   if (!trips.length) throw new Error('aucune course trouvée');
