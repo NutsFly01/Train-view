@@ -1,6 +1,6 @@
 # Train View
 
-Carte des trains circulant en France et dans une dizaine de pays européens, avec une position **estimée** à partir des horaires théoriques. L'idée : un [Flightradar24](https://www.flightradar24.com), mais pour les trains.
+Carte des trains circulant en France, dans une quinzaine de pays européens et sur quelques réseaux d'Amérique du Nord et d'Océanie, avec une position **estimée** à partir des horaires théoriques. L'idée : un [Flightradar24](https://www.flightradar24.com), mais pour les trains.
 
 - icônes orientées dans le sens de la marche, mouvement fluide ;
 - clic sur un train : panneau avec départ/arrivée, progression (km et temps), vitesse moyenne estimée, prochain arrêt, liste des arrêts et tracé du trajet ;
@@ -38,6 +38,15 @@ Ouvrez bien la page via `npm run serve` (ou une fois en ligne), pas en double-cl
 | 🇫🇮 Finlande | Fintraffic (digitraffic.fi), sans les trains de marchandises |
 | 🇪🇪 Estonie | peatus.ee |
 | 🇮🇪 Irlande | Transport for Ireland (Irish Rail) |
+| 🇱🇺 Luxembourg | data.public.lu |
+| 🇨🇿 Tchéquie (Prague) | PID |
+| 🇱🇹 Lituanie | visimarsrutai.lt |
+| 🇺🇸 États-Unis | Amtrak, MTA (Metro-North, LIRR), Metra, Caltrain |
+| 🇨🇦 Canada | VIA Rail, GO Transit |
+| 🇦🇺 Australie | PTV (Victoria), Translink (Queensland) |
+| 🇳🇿 Nouvelle-Zélande | Auckland Transport, Metlink |
+
+Pas de flux sans clé d'API (ou pas de flux du tout) pour le Royaume-Uni, l'Italie, la Suède, le Portugal ou le Japon, entre autres. Les horaires GTFS sont lus dans le fuseau de chaque opérateur (`agency_timezone`).
 
 Quand le nom du fichier change chaque année (ÖBB, mkuran.pl…), le script le cherche sur la page de téléchargement. Si un fichier ne contient aucun train circulant aujourd'hui, il essaie le suivant.
 

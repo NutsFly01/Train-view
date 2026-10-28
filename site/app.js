@@ -123,7 +123,7 @@ const tNow = (item, now) => now.in(item.trip.tz).minutes + item.offset;
 // ---------------------------------------------------------------------------
 // Carte
 
-const map = L.map('map', { zoomControl: false, minZoom: 4, worldCopyJump: true });
+const map = L.map('map', { zoomControl: false, minZoom: 2, worldCopyJump: true });
 L.control.zoom({ position: 'bottomright' }).addTo(map);
 L.control.scale({ position: 'bottomright', imperial: false }).addTo(map);
 
@@ -536,9 +536,9 @@ function refreshActive() {
 function buildFilters(countries) {
   const box = document.getElementById('filters');
   box.innerHTML = '';
-  const add = (key, set, html) => {
+  const add = (key, set, html, extraClass = '') => {
     const b = document.createElement('button');
-    b.className = 'chip';
+    b.className = `chip ${extraClass}`;
     b.dataset.key = key;
     b.title = 'Afficher / masquer';
     b.innerHTML = `${html}<span class="n">0</span>`;
@@ -554,15 +554,22 @@ function buildFilters(countries) {
     add(key, state.hiddenCats, `<span class="dot" style="background:${c.color}"></span><span class="label">${c.label}</span>`);
   }
   if (countries.length > 1) {
+    // Liste des pays repliable : elle devient longue.
+    const toggle = document.createElement('button');
+    toggle.className = 'chip toggle';
+    toggle.innerHTML = `<span class="label">Pays (${countries.length})</span><span class="caret">▾</span>`;
+    toggle.addEventListener('click', () => box.classList.toggle('collapsed'));
     box.appendChild(Object.assign(document.createElement('div'), { className: 'sep' }));
+    box.appendChild(toggle);
     for (const c of countries) {
-      add(c.id, state.hiddenCountries, `<span class="flag">${c.flag}</span><span class="label">${escapeHtml(c.name)}</span>`);
+      add(c.id, state.hiddenCountries, `<span class="flag">${c.flag}</span><span class="label">${escapeHtml(c.name)}</span>`, 'country');
     }
+    if (countries.length > 6) box.classList.add('collapsed');
   }
 }
 
 function updateFilterCounts(counts) {
-  for (const b of document.querySelectorAll('#filters .chip')) {
+  for (const b of document.querySelectorAll('#filters .chip[data-key]')) {
     b.querySelector('.n').textContent = (counts[b.dataset.key] || 0).toLocaleString('fr-FR');
   }
 }

@@ -327,3 +327,12 @@ h3 {
 @media (max-width: 720px) {
   #filters .sep { display: none; }
 }
+
+#filters { max-height: calc(100% - var(--bar-h) - 90px); overflow-y: auto; }
+#filters .toggle .caret { color: var(--muted); transition: transform 0.15s; }
+#filters.collapsed .toggle .caret { transform: rotate(-90deg); }
+#filters.collapsed .chip.country { display: none; }
+@media (max-width: 720px) {
+  #filters .toggle { display: none; }
+  #filters .chip.country { display: none; }
+}

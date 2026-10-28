@@ -15,7 +15,7 @@
 import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Unzip, UnzipInflate } from 'fflate';
+import { Unzip, UnzipInflate, unzipSync } from 'fflate';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = join(ROOT, 'site', 'data');
@@ -152,7 +152,135 @@ const COUNTRIES = [
     tz: 'Europe/Dublin',
     sources: [['https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip']],
   },
+  {
+    id: 'lu',
+    name: 'Luxembourg',
+    flag: '🇱🇺',
+    tz: 'Europe/Luxembourg',
+    // Flux national (tous modes) publié sur data.public.lu ; les liens de ressources sont des
+    // identifiants sans extension, dans l'ordre de la page (le plus récent d'abord).
+    sources: [{
+      page: 'https://data.public.lu/fr/datasets/horaires-et-arrets-des-transport-publics-gtfs/',
+      match: /href="(https:\/\/data\.public\.lu\/(?:fr\/)?datasets\/r\/[0-9a-f-]+)"/gi,
+      each: true,
+      keepOrder: true,
+      max: 3,
+    }],
+  },
+  {
+    id: 'cz',
+    name: 'Tchéquie (Prague)',
+    flag: '🇨🇿',
+    tz: 'Europe/Prague',
+    // Réseau PID : trains de la région de Prague (lignes S et R).
+    sources: [['https://data.pid.cz/PID_GTFS.zip']],
+  },
+  {
+    id: 'lt',
+    name: 'Lituanie',
+    flag: '🇱🇹',
+    tz: 'Europe/Vilnius',
+    sources: [['https://www.visimarsrutai.lt/gtfs/gtfs_all.zip']],
+  },
+  {
+    id: 'us',
+    name: 'États-Unis (Amtrak)',
+    flag: '🇺🇸',
+    tz: 'America/New_York',
+    typeOf: longNameType,
+    defaultCategory: 'gl',
+    sources: [['https://content.amtrak.com/content/gtfs/GTFS.zip']],
+  },
+  {
+    id: 'us-ny',
+    name: 'New York (Metro-North, LIRR)',
+    flag: '🇺🇸',
+    tz: 'America/New_York',
+    typeOf: longNameType,
+    defaultCategory: 'sub',
+    sources: [[
+      'https://rrgtfsfeeds.s3.amazonaws.com/gtfsmnr.zip',
+      'https://rrgtfsfeeds.s3.amazonaws.com/gtfslirr.zip',
+    ], [
+      'http://web.mta.info/developers/data/mnr/google_transit.zip',
+      'http://web.mta.info/developers/data/lirr/google_transit.zip',
+    ]],
+  },
+  {
+    id: 'us-il',
+    name: 'Chicago (Metra)',
+    flag: '🇺🇸',
+    tz: 'America/Chicago',
+    defaultCategory: 'sub',
+    sources: [['https://schedules.metrarail.com/gtfs/schedule.zip']],
+  },
+  {
+    id: 'us-ca',
+    name: 'San Francisco (Caltrain)',
+    flag: '🇺🇸',
+    tz: 'America/Los_Angeles',
+    typeOf: longNameType,
+    defaultCategory: 'sub',
+    sources: [['https://data.trilliumtransit.com/gtfs/caltrain-ca-us/caltrain-ca-us.zip']],
+  },
+  {
+    id: 'ca',
+    name: 'Canada (VIA Rail)',
+    flag: '🇨🇦',
+    tz: 'America/Toronto',
+    typeOf: longNameType,
+    defaultCategory: 'gl',
+    sources: [['https://www.viarail.ca/sites/all/files/gtfs/viarail.zip']],
+  },
+  {
+    id: 'ca-on',
+    name: 'Toronto (GO Transit)',
+    flag: '🇨🇦',
+    tz: 'America/Toronto',
+    defaultCategory: 'sub',
+    sources: [['https://assets.metrolinx.com/raw/upload/Documents/Metrolinx/Open%20Data/GO-GTFS.zip']],
+  },
+  {
+    id: 'au-vic',
+    name: 'Australie (Victoria)',
+    flag: '🇦🇺',
+    tz: 'Australia/Melbourne',
+    // Archive PTV : un zip par mode ; 1 = V/Line (régional), 2 = Metro Trains (banlieue).
+    defaultCategory: (feed) => (feed.endsWith('#1/google_transit.zip') ? 'reg' : 'sub'),
+    sources: [[
+      'https://data.ptv.vic.gov.au/downloads/gtfs.zip#1/google_transit.zip',
+      'https://data.ptv.vic.gov.au/downloads/gtfs.zip#2/google_transit.zip',
+    ], [
+      'http://data.ptv.vic.gov.au/downloads/gtfs.zip#1/google_transit.zip',
+      'http://data.ptv.vic.gov.au/downloads/gtfs.zip#2/google_transit.zip',
+    ]],
+  },
+  {
+    id: 'au-qld',
+    name: 'Australie (Queensland)',
+    flag: '🇦🇺',
+    tz: 'Australia/Brisbane',
+    defaultCategory: 'sub',
+    sources: [['https://gtfsrt.api.translink.com.au/GTFS/SEQ_GTFS.zip']],
+  },
+  {
+    id: 'nz',
+    name: 'Nouvelle-Zélande',
+    flag: '🇳🇿',
+    tz: 'Pacific/Auckland',
+    defaultCategory: 'sub',
+    // Auckland Transport et Metlink (Wellington).
+    sources: [[
+      'https://gtfs.at.govt.nz/gtfs.zip',
+      'https://static.opendata.metlink.org.nz/v1/gtfs/full.zip',
+    ]],
+  },
 ];
+
+// Type = nom long de la ligne (« Northeast Regional », « Acela »…), pour les flux sans code court.
+function longNameType(stopId, route, agencyName) {
+  return (route.route_long_name || route.route_short_name || agencyName || 'Train').trim();
+}
 
 // Alternatives pour un flux dont l'URL dépend de l'année d'horaire (en cours, suivante, précédente).
 function yearly(urlsFor) {
@@ -175,7 +303,7 @@ function swissSources() {
 // Catégories de trains (pour les couleurs et les filtres)
 
 const CATEGORY_RULES = [
-  ['hs', /^(TGV|OUIGO$|ICE|AVE$|AVLO$|AVANT$|IRYO|LYRIA|EUROSTAR|THALYS|ECE$|FRECCIA|RJX$|EIP$|PENDOLINO)/i],
+  ['hs', /^(TGV|OUIGO$|ICE|AVE$|AVLO$|AVANT$|IRYO|LYRIA|EUROSTAR|THALYS|ECE$|FRECCIA|RJX$|EIP$|PENDOLINO|ACELA)/i],
   ['gl', /^(INTERCIT|IC$|EC$|EN$|NJ$|NIGHTJET|IR$|ICN$|ICD$|ICL$|ALVIA|EUROMED|FLX$|D$|RJ$|INTERREGIO|LD$|TRENHOTEL|EUROCITY|EIC$|TLK$|IC-?L[YT]N$|SJ$|VY$|NACHTTREIN|EUROPEAN|GOVOLTA|TRENCELTA)/i],
   ['sub', /^(S$|S-BAHN|SBAHN|RER|SN$|C$|TRANSILIEN|CERCAN|RODALIES|SPR$|SPRINTER|DART|S-TOG|PENDELTÅG|PROXIMDAD|PROXIMIDAD)/i],
 ];
@@ -196,8 +324,9 @@ function categoryFromName(type) {
 }
 
 // Ordre de priorité : réglage du pays, nom du type, type de ligne étendu, sinon régional.
-const categoryOf = (country, type, routeType) =>
-  country.categories?.[type] || categoryFromName(type) || categoryFromRouteType(routeType) || 'reg';
+const categoryOf = (country, feedName, type, routeType) =>
+  country.categories?.[type] || categoryFromName(type) || categoryFromRouteType(routeType)
+  || (typeof country.defaultCategory === 'function' ? country.defaultCategory(feedName) : country.defaultCategory) || 'reg';
 
 // SNCF : le type est dans l'identifiant d'arrêt, ex. « StopPoint:OCETGV INOUI-87686006 ».
 function sncfType(stopId, route, agencyName) {
@@ -223,18 +352,29 @@ function genericType(stopId, route, agencyName) {
 // ---------------------------------------------------------------------------
 // Lecture des zip GTFS en flux (certains fichiers dépassent le gigaoctet décompressé)
 
+// « url#chemin/interne.zip » désigne un zip contenu dans un autre (ex. PTV Victoria).
+const outerCache = new Map();
 async function download(url) {
-  console.log(`  ↓ ${url}`);
-  const res = await fetch(url, {
-    redirect: 'follow',
-    headers: { 'User-Agent': 'train-view (GTFS)' },
-    signal: AbortSignal.timeout(5 * 60 * 1000),
-  });
-  if (!res.ok) throw new Error(`${url} : HTTP ${res.status}`);
-  const buf = new Uint8Array(await res.arrayBuffer());
-  if (buf[0] !== 0x50 || buf[1] !== 0x4b) throw new Error(`${url} : ce n'est pas un fichier zip`);
-  console.log(`    ${(buf.length / 1e6).toFixed(1)} Mo`);
-  return buf;
+  const [outer, inner] = url.split('#');
+  let buf = outerCache.get(outer);
+  if (!buf) {
+    console.log(`  ↓ ${outer}`);
+    const res = await fetch(outer, {
+      redirect: 'follow',
+      headers: { 'User-Agent': 'train-view (GTFS)' },
+      signal: AbortSignal.timeout(5 * 60 * 1000),
+    });
+    if (!res.ok) throw new Error(`${outer} : HTTP ${res.status}`);
+    buf = new Uint8Array(await res.arrayBuffer());
+    if (buf[0] !== 0x50 || buf[1] !== 0x4b) throw new Error(`${outer} : ce n'est pas un fichier zip`);
+    console.log(`    ${(buf.length / 1e6).toFixed(1)} Mo`);
+    if (inner) outerCache.set(outer, buf);
+  }
+  if (!inner) return buf;
+  const files = unzipSync(buf, { filter: (f) => f.name === inner || f.name.endsWith(`/${inner}`) });
+  const found = Object.values(files)[0];
+  if (!found) throw new Error(`${url} : fichier interne introuvable`);
+  return found;
 }
 
 // Lit le fichier `name` du zip et appelle onRow(champs, entêtes) pour chaque ligne CSV.
@@ -351,7 +491,8 @@ const toMinutes = (t) => {
 // Construction d'un pays
 
 // Trouve sur une page web les liens vers des fichiers GTFS (noms qui changent chaque année).
-async function discover({ page, match }) {
+async function discover(source) {
+  const { page, match } = source;
   console.log(`  🔎 ${page}`);
   const res = await fetch(page, { headers: { 'User-Agent': 'train-view (GTFS)' }, signal: AbortSignal.timeout(60 * 1000) });
   if (!res.ok) throw new Error(`${page} : HTTP ${res.status}`);
@@ -359,7 +500,8 @@ async function discover({ page, match }) {
   const urls = new Set();
   for (const m of html.matchAll(match)) urls.add(new URL(m[1].replace(/&amp;/g, '&'), page).href);
   // Les noms contiennent souvent l'année : les plus récents d'abord.
-  const list = [...urls].sort().reverse();
+  let list = source.keepOrder ? [...urls] : [...urls].sort().reverse();
+  if (source.max) list = list.slice(0, source.max);
   if (!list.length) throw new Error(`${page} : aucun lien trouvé`);
   console.log(`    ${list.length} fichier(s) : ${list.map((u) => u.split('/').pop()).join(', ')}`);
   return list;
@@ -383,9 +525,9 @@ async function* feedAlternatives(country) {
   if (process.env.GTFS_FILES) {
     // « a.zip b.zip » (un seul pays) ou « fr:a.zip de:b.zip ».
     const files = process.env.GTFS_FILES.split(/\s+/).filter(Boolean)
-      .map((f) => /^[a-z]{2}:/.test(f) ? f : `${country.id}:${f}`)
+      .map((f) => /^[a-z]{2}(-[a-z]+)?:/.test(f) ? f : `${country.id}:${f}`)
       .filter((f) => f.startsWith(`${country.id}:`))
-      .map((f) => f.slice(3));
+      .map((f) => f.slice(country.id.length + 1));
     if (!files.length) throw new Error('aucun fichier GTFS_FILES pour ce pays');
     yield Promise.all(files.map(async (f) => ({ name: f, zip: new Uint8Array(await readFile(f)) })));
     return;
@@ -424,7 +566,15 @@ async function buildCountry(country) {
 
 function buildFromFeeds(country, feeds) {
   const dates = [];
-  for (let d = -1; d < DAYS; d++) dates.push(dateIn(country.tz, d));
+  // Les horaires GTFS sont exprimés dans le fuseau de l'opérateur (agency_timezone).
+  let tz = country.tz;
+  readCsv(feeds[0].zip, 'agency.txt', (f, h) => {
+    const t = col(f, h, 'agency_timezone');
+    if (t && tz === country.tz) {
+      try { new Intl.DateTimeFormat('en', { timeZone: t }); tz = t; } catch { /* fuseau inconnu : on garde celui du pays */ }
+    }
+  });
+  for (let d = -1; d < DAYS; d++) dates.push(dateIn(tz, d));
   const dateIndex = new Map(dates.map((d, i) => [d, i]));
   const keepRoute = country.routeTypes || RAIL;
   const typeOf = country.typeOf || genericType;
@@ -586,7 +736,7 @@ function buildFromFeeds(country, feeds) {
       if (seenTrips.has(dedupKey)) continue;
       seenTrips.add(dedupKey);
 
-      const cat = categoryOf(country, type, route.rt);
+      const cat = categoryOf(country, name, type, route.rt);
       const typeKey = `${type}|${cat}`;
       let ti = typeIndex.get(typeKey);
       if (ti === undefined) { ti = types.length; types.push([type, cat]); typeIndex.set(typeKey, ti); typeCounts.push(0); }
@@ -618,7 +768,7 @@ function buildFromFeeds(country, feeds) {
     name: country.name,
     flag: country.flag,
     generated: new Date().toISOString(),
-    timezone: country.tz,
+    timezone: tz,
     dates,
     types,
     stops,
@@ -632,7 +782,7 @@ function buildFromFeeds(country, feeds) {
 async function main() {
   const wanted = process.env.COUNTRIES ? process.env.COUNTRIES.split(/[\s,]+/).filter(Boolean) : null;
   const list = COUNTRIES.filter((c) => !wanted || wanted.includes(c.id));
-  if (process.env.GTFS_FILES && list.length !== 1 && !/(^|\s)[a-z]{2}:/.test(process.env.GTFS_FILES)) {
+  if (process.env.GTFS_FILES && list.length !== 1 && !/(^|\s)[a-z]{2}(-[a-z]+)?:/.test(process.env.GTFS_FILES)) {
     throw new Error('GTFS_FILES sans préfixe de pays nécessite un seul pays (ex. COUNTRIES=fr).');
   }
 
