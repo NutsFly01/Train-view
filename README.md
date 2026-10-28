@@ -1,6 +1,6 @@
 # Train View
 
-Carte des trains circulant en France et dans les pays voisins (Allemagne, Suisse, Belgique, Pays-Bas, Espagne), avec une position **estimée** à partir des horaires théoriques. L'idée : un [Flightradar24](https://www.flightradar24.com), mais pour les trains.
+Carte des trains circulant en France et dans une dizaine de pays européens, avec une position **estimée** à partir des horaires théoriques. L'idée : un [Flightradar24](https://www.flightradar24.com), mais pour les trains.
 
 - icônes orientées dans le sens de la marche, mouvement fluide ;
 - clic sur un train : panneau avec départ/arrivée, progression (km et temps), vitesse moyenne estimée, prochain arrêt, liste des arrêts et tracé du trajet ;
@@ -31,6 +31,15 @@ Ouvrez bien la page via `npm run serve` (ou une fois en ligne), pas en double-cl
 | 🇧🇪 Belgique | SNCB |
 | 🇳🇱 Pays-Bas | OVapi (gtfs.ovapi.nl) |
 | 🇪🇸 Espagne | Renfe (grandes lignes, moyenne distance, Cercanías) |
+| 🇦🇹 Autriche | ÖBB (data.oebb.at) |
+| 🇵🇱 Pologne | mkuran.pl (PKP Intercity, Polregio…) |
+| 🇩🇰 Danemark | Rejseplanen |
+| 🇳🇴 Norvège | Entur |
+| 🇫🇮 Finlande | Fintraffic (digitraffic.fi), sans les trains de marchandises |
+| 🇪🇪 Estonie | peatus.ee |
+| 🇮🇪 Irlande | Transport for Ireland (Irish Rail) |
+
+Quand le nom du fichier change chaque année (ÖBB, mkuran.pl…), le script le cherche sur la page de téléchargement. Si un fichier ne contient aucun train circulant aujourd'hui, il essaie le suivant.
 
 Un pays dont le flux est indisponible est simplement ignoré. Les sources sont définies en haut de `scripts/build-data.mjs` : pour ajouter un pays, il suffit d'y ajouter l'URL de son flux GTFS. Options :
 
