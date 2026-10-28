@@ -163,3 +163,8 @@ h1 { font-size: 18px; margin: 0; }
   #topbar { width: auto; right: 12px; }
   #panel { top: auto; left: 12px; right: 12px; bottom: 28px; width: auto; max-height: 55%; }
 }
+
+/* Mode sombre : on assombrit les tuiles OpenStreetMap (pas de version sombre officielle). */
+@media (prefers-color-scheme: dark) {
+  .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.9); }
+}

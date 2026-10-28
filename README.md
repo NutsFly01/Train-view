@@ -12,6 +12,8 @@ npm run data    # télécharge les horaires SNCF et génère site/data/network.j
 npm run serve   # http://localhost:8080
 ```
 
+Ouvrez bien la page via `npm run serve` (ou une fois en ligne), pas en double-cliquant sur `index.html` : en `file://`, le navigateur ne peut pas charger les horaires et OpenStreetMap refuse les tuiles. Le fond de carte (OpenStreetMap) ne demande aucune clé d'API.
+
 `npm run data` utilise les flux GTFS publiés par SNCF Voyageurs sur [transport.data.gouv.fr](https://transport.data.gouv.fr). Options :
 
 - `GTFS_URLS="url1 url2"` : autres flux GTFS à télécharger (fusionnés) ;

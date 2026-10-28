@@ -33,12 +33,30 @@ const state = {
 
 const map = L.map('map', { zoomControl: false, preferCanvas: true }).setView([46.6, 2.4], 6);
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
-const dark = matchMedia('(prefers-color-scheme: dark)').matches;
-L.tileLayer(`https://{s}.basemaps.cartocdn.com/${dark ? 'dark_all' : 'light_all'}/{z}/{x}/{y}{r}.png`, {
-  maxZoom: 19,
-  subdomains: 'abcd',
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a> · Horaires SNCF (GTFS)',
-}).addTo(map);
+// Fond de carte OpenStreetMap : aucune clé d'API nécessaire. Si le serveur principal
+// refuse les tuiles (trop d'erreurs), on bascule sur le serveur d'OpenStreetMap France.
+const TILE_SOURCES = [
+  { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', maxZoom: 19 },
+  { url: 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', maxZoom: 20, subdomains: 'abc' },
+];
+let tileSource = 0;
+let tileErrors = 0;
+function addTiles() {
+  const src = TILE_SOURCES[tileSource];
+  const layer = L.tileLayer(src.url, {
+    maxZoom: src.maxZoom,
+    subdomains: src.subdomains || 'abc',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Horaires SNCF (GTFS)',
+  }).addTo(map);
+  layer.on('tileerror', () => {
+    if (++tileErrors < 6 || tileSource >= TILE_SOURCES.length - 1) return;
+    tileSource++;
+    tileErrors = 0;
+    layer.remove();
+    addTiles();
+  });
+}
+addTiles();
 const renderer = L.canvas({ padding: 0.3 });
 
 // ---------------------------------------------------------------------------
