@@ -8,6 +8,7 @@
 //   GTFS_FILES="a.zip b.zip" COUNTRIES=fr node scripts/build-data.mjs   # fichiers locaux
 //   GTFS_FILES="fr:a.zip de:b.zip" COUNTRIES="fr de" node scripts/build-data.mjs
 //   DAYS=3 node scripts/build-data.mjs              # jours couverts à partir d'aujourd'hui
+//   OSM=0 node scripts/build-data.mjs               # sans tracés OpenStreetMap (plus rapide)
 //
 // Un pays dont le flux est indisponible est ignoré (avec un avertissement) : les autres
 // sont quand même publiés.
@@ -16,6 +17,7 @@ import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Unzip, UnzipInflate, unzipSync } from 'fflate';
+import { cutShape, routeOnOsm, simplify, encodePolyline } from './rail-geometry.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT_DIR = join(ROOT, 'site', 'data');
@@ -94,11 +96,8 @@ const COUNTRIES = [
     name: 'Autriche',
     flag: '🇦🇹',
     tz: 'Europe/Vienna',
-    // ÖBB : le nom du fichier change avec l'horaire annuel, on le cherche sur la page du jeu de données.
-    sources: [
-      { page: 'https://data.oebb.at/de/datensaetze~soll-fahrplan-gtfs~', match: /href="([^"]+\.zip)"/gi, each: true },
-      ...yearly((y) => [`https://static.oebb.at/open-data/soll-fahrplan-gtfs/GTFS_OP_${y}_obb.zip`]),
-    ],
+    // ÖBB : le nom du fichier contient l'année de l'horaire.
+    sources: yearly((y) => [`https://static.oebb.at/open-data/soll-fahrplan-gtfs/GTFS_OP_${y}_obb.zip`]),
   },
   {
     id: 'pl',
@@ -245,6 +244,8 @@ const COUNTRIES = [
     name: 'Australie (Victoria)',
     flag: '🇦🇺',
     tz: 'Australia/Melbourne',
+    // Le métro de Melbourne est publié en route_type 400 (rail urbain).
+    routeTypes: (t) => RAIL(t) || t === 400,
     // Archive PTV : un zip par mode ; 1 = V/Line (régional), 2 = Metro Trains (banlieue).
     defaultCategory: (feed) => (feed.endsWith('#1/google_transit.zip') ? 'reg' : 'sub'),
     sources: [[
@@ -359,13 +360,23 @@ async function download(url) {
   let buf = outerCache.get(outer);
   if (!buf) {
     console.log(`  ↓ ${outer}`);
-    const res = await fetch(outer, {
-      redirect: 'follow',
-      headers: { 'User-Agent': 'train-view (GTFS)' },
-      signal: AbortSignal.timeout(5 * 60 * 1000),
-    });
-    if (!res.ok) throw new Error(`${outer} : HTTP ${res.status}`);
-    buf = new Uint8Array(await res.arrayBuffer());
+    // Deux essais : les coupures réseau passagères (« fetch failed ») ne sont pas rares.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const res = await fetch(outer, {
+          redirect: 'follow',
+          headers: { 'User-Agent': 'train-view (GTFS)' },
+          signal: AbortSignal.timeout(5 * 60 * 1000),
+        });
+        if (!res.ok) throw Object.assign(new Error(`${outer} : HTTP ${res.status}`), { final: res.status < 500 });
+        buf = new Uint8Array(await res.arrayBuffer());
+        break;
+      } catch (err) {
+        if (attempt >= 2 || err.final) throw err;
+        console.warn(`    nouvel essai après : ${err.message}`);
+        await new Promise((r) => setTimeout(r, 10000));
+      }
+    }
     if (buf[0] !== 0x50 || buf[1] !== 0x4b) throw new Error(`${outer} : ce n'est pas un fichier zip`);
     console.log(`    ${(buf.length / 1e6).toFixed(1)} Mo`);
     if (inner) outerCache.set(outer, buf);
@@ -555,7 +566,7 @@ async function buildCountry(country) {
   for await (const feeds of feedAlternatives(country)) {
     if (!feeds.length) continue;
     try {
-      return buildFromFeeds(country, feeds);
+      return await buildFromFeeds(country, feeds);
     } catch (err) {
       console.warn(`  échec : ${err.message}`);
       lastError = err;
@@ -564,7 +575,7 @@ async function buildCountry(country) {
   throw lastError;
 }
 
-function buildFromFeeds(country, feeds) {
+async function buildFromFeeds(country, feeds) {
   const dates = [];
   // Les horaires GTFS sont exprimés dans le fuseau de l'opérateur (agency_timezone).
   let tz = country.tz;
@@ -584,6 +595,7 @@ function buildFromFeeds(country, feeds) {
   const types = [];
   const typeIndex = new Map();
   const typeCounts = [];
+  const segGeom = new Map(); // "a,b" -> polyligne entre deux gares consécutives
   const serviceKeys = new Map();
   const services = [];
   const trips = [];
@@ -649,6 +661,7 @@ function buildFromFeeds(country, feeds) {
         route,
         service,
         shortName: col(f, h, 'trip_short_name'),
+        shapeId: col(f, h, 'shape_id'),
         headsign: col(f, h, 'trip_headsign'),
         stops: [],
       });
@@ -704,6 +717,7 @@ function buildFromFeeds(country, feeds) {
     };
 
     let kept = 0;
+    const shaped = []; // [shape_id, flat] des courses ayant un tracé GTFS
     for (const [tripId, t] of feedTrips) {
       if (t.stops.length < 2) continue;
       t.stops.sort((a, b) => a[0] - b[0]);
@@ -742,9 +756,11 @@ function buildFromFeeds(country, feeds) {
       if (ti === undefined) { ti = types.length; types.push([type, cat]); typeIndex.set(typeKey, ti); typeCounts.push(0); }
       typeCounts[ti]++;
       trips.push(line ? [number, ti, t.service, flat, line] : [number, ti, t.service, flat]);
+      if (t.shapeId) shaped.push([t.shapeId, flat]);
       kept++;
     }
     console.log(`  ${name} : ${kept} courses retenues`);
+    if (shaped.length) addShapeGeometry(zip, shaped, stops, segGeom);
     if (!kept) {
       // Diagnostic : on indique à quelle étape les courses ont été perdues.
       let calRange = '';
@@ -763,6 +779,23 @@ function buildFromFeeds(country, feeds) {
   // Résumé des types trouvés, utile pour ajuster les catégories.
   const summary = types.map((t, i) => [t, typeCounts[i]]).sort((a, b) => b[1] - a[1]).slice(0, 25);
   console.log(`  types : ${summary.map(([[t, c], n]) => `${t} (${c}) ${n}`).join(', ')}`);
+
+  // Tronçons sans tracé GTFS : on cherche le chemin sur les voies OpenStreetMap.
+  const missing = new Map();
+  for (const [, , , flat] of trips) {
+    for (let i = 3; i < flat.length; i += 3) {
+      const a = flat[i - 3];
+      const b = flat[i];
+      const key = a < b ? `${a},${b}` : `${b},${a}`;
+      if (!segGeom.has(`${a},${b}`) && !segGeom.has(`${b},${a}`) && !missing.has(key)) missing.set(key, a < b ? [a, b] : [b, a]);
+    }
+  }
+  if (missing.size && process.env.OSM !== '0') {
+    for (const [key, pts] of await routeOnOsm([...missing.values()], stops)) segGeom.set(key, pts);
+  }
+  const segs = encodeSegments(segGeom);
+  console.log(`  tracés : ${Object.keys(segs).length} tronçons sur voies réelles`);
+
   return {
     id: country.id,
     name: country.name,
@@ -774,7 +807,67 @@ function buildFromFeeds(country, feeds) {
     stops,
     services,
     trips,
+    segs,
   };
+}
+
+// Lit les tracés GTFS des courses `shaped` et les découpe entre gares consécutives.
+function addShapeGeometry(zip, shaped, stops, segGeom) {
+  const wanted = new Map(); // shape_id -> courses
+  for (const [shapeId, flat] of shaped) {
+    let needed = false;
+    for (let i = 3; i < flat.length && !needed; i += 3) {
+      if (!segGeom.has(`${flat[i - 3]},${flat[i]}`) && !segGeom.has(`${flat[i]},${flat[i - 3]}`)) needed = true;
+    }
+    if (!needed) continue;
+    if (!wanted.has(shapeId)) wanted.set(shapeId, []);
+    wanted.get(shapeId).push(flat);
+  }
+  if (!wanted.size) return;
+  const shapes = new Map();
+  readCsv(zip, 'shapes.txt', (f, h) => {
+    const id = f[h.shape_id];
+    if (!wanted.has(id)) return;
+    let pts = shapes.get(id);
+    if (!pts) shapes.set(id, (pts = []));
+    pts.push([Number(f[h.shape_pt_sequence]), Number(f[h.shape_pt_lat]), Number(f[h.shape_pt_lon])]);
+  });
+  let added = 0;
+  for (const [id, flats] of wanted) {
+    const raw = shapes.get(id);
+    if (!raw || raw.length < 2) continue;
+    raw.sort((a, b) => a[0] - b[0]);
+    const shape = raw.map(([, lat, lon]) => [lat, lon]);
+    const seen = new Set();
+    for (const flat of flats) {
+      // Une même séquence de gares n'est découpée qu'une fois, et seulement s'il manque un tronçon.
+      const seq = flat.filter((_, i) => i % 3 === 0);
+      const seqKey = seq.join(',');
+      if (seen.has(seqKey)) continue;
+      seen.add(seqKey);
+      if (seq.every((x, i) => i === 0 || segGeom.has(`${seq[i - 1]},${x}`) || segGeom.has(`${x},${seq[i - 1]}`))) continue;
+      const latlon = [];
+      for (let i = 0; i < flat.length; i += 3) latlon.push([stops[flat[i]][1], stops[flat[i]][2]]);
+      const pieces = cutShape(shape, latlon);
+      pieces.forEach((pts, k) => {
+        const a = flat[k * 3];
+        const b = flat[(k + 1) * 3];
+        if (pts && !segGeom.has(`${a},${b}`) && !segGeom.has(`${b},${a}`)) { segGeom.set(`${a},${b}`, pts); added++; }
+      });
+    }
+  }
+  console.log(`    tracés GTFS : ${added} tronçons (${shapes.size} tracés lus)`);
+}
+
+// Encode les tracés, clés « a,b » avec a < b (le tracé va de a vers b).
+function encodeSegments(segGeom) {
+  const out = {};
+  for (const [key, pts] of segGeom) {
+    const [a, b] = key.split(',').map(Number);
+    const oriented = a < b ? pts : [...pts].reverse();
+    out[a < b ? key : `${b},${a}`] = encodePolyline(simplify(oriented));
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

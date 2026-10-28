@@ -100,6 +100,12 @@ function positionAt(trip, t) {
       const a = stops[f[(i - 1) * 3]];
       const b = stops[f[i * 3]];
       const k = (t - prevDep) / Math.max(1e-6, arr - prevDep);
+      const g = segment(trip, i - 1);
+      if (g) {
+        // Sur la voie réelle : on avance de la même fraction de la longueur du tracé.
+        const p = pointAlong(g, k * g.len);
+        return { lat: p[0], lon: p[1], seg: i - 1, k, atStop: false, g };
+      }
       return { lat: a[1] + (b[1] - a[1]) * k, lon: a[2] + (b[2] - a[2]) * k, seg: i - 1, k, atStop: false };
     }
   }
@@ -107,15 +113,96 @@ function positionAt(trip, t) {
   return { lat: last[1], lon: last[2], seg: n - 1, k: 0, atStop: true };
 }
 
-// Distances cumulées (km) le long du trajet, calculées à la demande.
+// Distances cumulées (km) le long du trajet (voie réelle si connue), calculées à la demande.
 function cumulativeKm(trip) {
   if (trip.cum) return trip.cum;
   const stops = trip.S;
   const cum = [0];
   for (let i = 3; i < trip.flat.length; i += 3) {
-    cum.push(cum[cum.length - 1] + haversine(stops[trip.flat[i - 3]], stops[trip.flat[i]]));
+    const g = segment(trip, i / 3 - 1);
+    cum.push(cum[cum.length - 1] + (g ? g.len / 1000 : haversine(stops[trip.flat[i - 3]], stops[trip.flat[i]])));
   }
   return (trip.cum = cum);
+}
+
+// ---------------------------------------------------------------------------
+// Tracés des voies entre deux gares (fournis par les données, encodés au format « polyline »)
+
+function decodePolyline(str) {
+  const pts = [];
+  let i = 0;
+  let lat = 0;
+  let lon = 0;
+  const next = () => {
+    let shift = 0;
+    let result = 0;
+    let b;
+    do {
+      b = str.charCodeAt(i++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+    return result & 1 ? ~(result >> 1) : result >> 1;
+  };
+  while (i < str.length) {
+    lat += next();
+    lon += next();
+    pts.push([lat / 1e5, lon / 1e5]);
+  }
+  return pts;
+}
+
+function withLengths(pts) {
+  const cum = [0];
+  for (let i = 1; i < pts.length; i++) {
+    cum.push(cum[i - 1] + haversine([0, pts[i - 1][0], pts[i - 1][1]], [0, pts[i][0], pts[i][1]]) * 1000);
+  }
+  return { pts, cum, len: cum[cum.length - 1] };
+}
+
+// Tracé du tronçon entre la gare i et la gare i+1 du train (orienté dans son sens), ou null.
+function segment(trip, i) {
+  const country = trip.country;
+  const a = trip.flat[i * 3];
+  const b = trip.flat[(i + 1) * 3];
+  if (a === undefined || b === undefined || !country.data.segs) return null;
+  const key = a < b ? `${a},${b}` : `${b},${a}`;
+  const ck = a < b ? key : `${key}r`;
+  let g = country.segCache.get(ck);
+  if (g === undefined) {
+    const enc = country.data.segs[key];
+    g = null;
+    if (enc) {
+      const pts = decodePolyline(enc);
+      g = withLengths(a < b ? pts : pts.reverse());
+    }
+    country.segCache.set(ck, g);
+  }
+  return g;
+}
+
+// Point situé à `d` mètres du début du tracé.
+function pointAlong(g, d) {
+  const { pts, cum } = g;
+  if (d <= 0) return pts[0];
+  if (d >= g.len) return pts[pts.length - 1];
+  let lo = 0;
+  let hi = cum.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid] <= d) lo = mid; else hi = mid;
+  }
+  const k = (d - cum[lo]) / Math.max(1e-9, cum[hi] - cum[lo]);
+  return [pts[lo][0] + (pts[hi][0] - pts[lo][0]) * k, pts[lo][1] + (pts[hi][1] - pts[lo][1]) * k];
+}
+
+// Points (lat, lon) du tronçon i, voie réelle ou ligne droite.
+function segmentPoints(trip, i) {
+  const g = segment(trip, i);
+  if (g) return g.pts;
+  const a = trip.S[trip.flat[i * 3]];
+  const b = trip.S[trip.flat[(i + 1) * 3]];
+  return [[a[1], a[2]], [b[1], b[2]]];
 }
 
 const tNow = (item, now) => now.in(item.trip.tz).minutes + item.offset;
@@ -219,15 +306,27 @@ const DARK = matchMedia('(prefers-color-scheme: dark)').matches;
 const ICONS = { normal: trainPath(0.9), small: trainPath(0.65), big: trainPath(1.35) };
 
 function bearing(trip, pos) {
-  // Orientation à l'écran : direction du tronçon en cours (ou du suivant si le train est à quai).
+  // Orientation à l'écran : direction de la voie autour du train (à ±150 m sur le tracé),
+  // sinon direction du tronçon en cours (ou du suivant si le train est à quai).
   const f = trip.flat;
   const n = f.length / 3;
   let i = pos.seg;
   if (i >= n - 1) i = n - 2;
-  const a = trip.S[f[i * 3]];
-  const b = trip.S[f[(i + 1) * 3]];
-  const pa = map.latLngToContainerPoint([a[1], a[2]]);
-  const pb = map.latLngToContainerPoint([b[1], b[2]]);
+  const g = pos.g || segment(trip, i);
+  let a;
+  let b;
+  if (g) {
+    const d = pos.g ? pos.k * g.len : (pos.seg >= n - 1 ? g.len : 0);
+    a = pointAlong(g, d - 150);
+    b = pointAlong(g, d + 150);
+  } else {
+    const sa = trip.S[f[i * 3]];
+    const sb = trip.S[f[(i + 1) * 3]];
+    a = [sa[1], sa[2]];
+    b = [sb[1], sb[2]];
+  }
+  const pa = map.latLngToContainerPoint(a);
+  const pb = map.latLngToContainerPoint(b);
   return Math.atan2(pb.x - pa.x, -(pb.y - pa.y));
 }
 
@@ -303,6 +402,7 @@ function drawTrain(p, angle, icon, color, highlight, stroke = '#fff') {
 function drawRoute(trip, pos) {
   const f = trip.flat;
   const stops = trip.S;
+  const n = f.length / 3;
   const pts = [];
   for (let i = 0; i < f.length; i += 3) {
     const s = stops[f[i]];
@@ -310,13 +410,25 @@ function drawRoute(trip, pos) {
   }
   const cur = map.latLngToContainerPoint([pos.lat, pos.lon]);
   const color = trip.color;
+  const line = (latlngs) => {
+    for (const ll of latlngs) {
+      const p = map.latLngToContainerPoint(ll);
+      ctx.lineTo(p.x, p.y);
+    }
+  };
+
+  // Le tronçon en cours est coupé à la position du train.
+  const g = pos.g;
+  const cutAt = g ? pos.k * g.len : 0;
+  const curSeg = Math.min(pos.seg, n - 2);
 
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  // Partie parcourue.
+  // Partie parcourue (sur les voies réelles quand le tracé est connu).
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i <= pos.seg; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  for (let i = 0; i < pos.seg && i < n - 1; i++) line(segmentPoints(trip, i));
+  if (g) line(g.pts.filter((_, j) => g.cum[j] < cutAt));
   ctx.lineTo(cur.x, cur.y);
   ctx.strokeStyle = color;
   ctx.lineWidth = 4;
@@ -324,7 +436,12 @@ function drawRoute(trip, pos) {
   // Partie restante.
   ctx.beginPath();
   ctx.moveTo(cur.x, cur.y);
-  for (let i = pos.seg + 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  if (pos.seg < n - 1) {
+    if (g) line(g.pts.filter((_, j) => g.cum[j] > cutAt));
+    else if (pos.atStop) line(segmentPoints(trip, curSeg));
+    else line(segmentPoints(trip, curSeg).slice(-1));
+    for (let i = pos.seg + 1; i < n - 1; i++) line(segmentPoints(trip, i));
+  }
   ctx.setLineDash([6, 6]);
   ctx.lineWidth = 2.5;
   ctx.stroke();
@@ -434,7 +551,7 @@ async function load() {
 }
 
 function addCountry(meta, data) {
-  const country = { id: meta.id, name: meta.name, flag: meta.flag, data };
+  const country = { id: meta.id, name: meta.name, flag: meta.flag, data, segCache: new Map() };
   state.countries.push(country);
   const stops = data.stops;
   const used = new Set();

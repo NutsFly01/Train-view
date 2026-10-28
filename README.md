@@ -9,7 +9,13 @@ Carte des trains circulant en France, dans une quinzaine de pays européens et s
 - URL partageable, comme sur Flightradar24 : `#46.60,2.40/6` (centre et zoom), `#46.60,2.40/6/6017` (train sélectionné) ;
 - filtres par catégorie (grande vitesse, grandes lignes, régional, banlieue / S-Bahn) et par pays.
 
-Pas de temps réel : la position est calculée en interpolant entre l'heure de départ d'une gare et l'heure d'arrivée à la suivante, en ligne droite entre les deux gares. Les retards, suppressions et travaux ne sont pas pris en compte.
+Pas de temps réel : la position est calculée en interpolant entre l'heure de départ d'une gare et l'heure d'arrivée à la suivante, **le long des vraies voies** :
+
+- quand l'opérateur publie le tracé des lignes (`shapes.txt` du GTFS), on le découpe entre chaque paire de gares ;
+- sinon, on calcule le plus court chemin sur le réseau ferré OpenStreetMap (téléchargé via l'API Overpass par tuiles de 1°, gardées 30 jours dans `.cache/osm-rail`) ;
+- à défaut (gare loin des voies, détour trop grand), le train va en ligne droite.
+
+Le premier calcul des voies OSM est long ; il est limité à 70 minutes par déploiement (`OSM_BUDGET_MIN`) et se complète aux déploiements suivants grâce au cache. `OSM=0` le désactive. Les retards, suppressions et travaux ne sont pas pris en compte.
 
 ## Lancer en local
 
