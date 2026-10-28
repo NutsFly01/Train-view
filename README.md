@@ -1,6 +1,13 @@
 # Train View
 
-Carte des trains SNCF (TGV INOUI, OUIGO, Intercités, TER…) circulant en France, avec une position **estimée** à partir des horaires théoriques. Cliquez sur un train pour voir son numéro, son trajet, le prochain arrêt et la liste des arrêts.
+Carte des trains SNCF (TGV INOUI, OUIGO, Intercités, TER…) circulant en France, avec une position **estimée** à partir des horaires théoriques. L'idée : un [Flightradar24](https://www.flightradar24.com), mais pour les trains.
+
+- icônes orientées dans le sens de la marche, mouvement fluide ;
+- clic sur un train : panneau avec départ/arrivée, progression (km et temps), vitesse moyenne estimée, prochain arrêt, liste des arrêts et tracé du trajet ;
+- « Suivre le train » pour garder la carte centrée dessus ;
+- recherche d'un train (numéro, gare de départ ou d'arrivée) ou d'une gare ;
+- URL partageable, comme sur Flightradar24 : `#46.60,2.40/6` (centre et zoom), `#46.60,2.40/6/6017` (train sélectionné) ;
+- filtres par type de train (TGV INOUI, OUIGO, TER…).
 
 Pas de temps réel : la position est calculée en interpolant entre l'heure de départ d'une gare et l'heure d'arrivée à la suivante, en ligne droite entre les deux gares. Les retards, suppressions et travaux ne sont pas pris en compte.
 
