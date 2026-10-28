@@ -28,7 +28,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Génération des horaires SNCF
+      - name: Génération des horaires
         run: npm run data
       - uses: actions/upload-pages-artifact@v3
         with:

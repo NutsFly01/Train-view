@@ -321,3 +321,9 @@ h3 {
   }
   .ph { border-radius: 12px 12px 0 0; }
 }
+
+#filters .sep { height: 1px; margin: 4px 2px; background: var(--line); }
+#filters .flag { width: 16px; text-align: center; font-size: 13px; line-height: 1; }
+@media (max-width: 720px) {
+  #filters .sep { display: none; }
+}

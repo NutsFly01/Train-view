@@ -1,130 +1,242 @@
-// Télécharge les horaires théoriques SNCF (GTFS) et produit site/data/network.json,
-// un fichier compact que le navigateur utilise pour calculer la position des trains.
+// Télécharge les horaires théoriques (GTFS) des trains de plusieurs pays et produit,
+// dans site/data/, un fichier compact par pays plus un index (index.json). Le navigateur
+// s'en sert pour calculer la position des trains.
 //
 // Usage :
-//   node scripts/build-data.mjs                  # télécharge les flux SNCF par défaut
-//   GTFS_URLS="url1 url2" node scripts/build-data.mjs
-//   GTFS_FILES="a.zip b.zip" node scripts/build-data.mjs   # fichiers locaux
-//   DAYS=7 node scripts/build-data.mjs           # nombre de jours couverts (défaut 7)
+//   node scripts/build-data.mjs                     # tous les pays
+//   COUNTRIES="fr de" node scripts/build-data.mjs   # seulement certains pays
+//   GTFS_FILES="a.zip b.zip" COUNTRIES=fr node scripts/build-data.mjs   # fichiers locaux
+//   GTFS_FILES="fr:a.zip de:b.zip" COUNTRIES="fr de" node scripts/build-data.mjs
+//   DAYS=3 node scripts/build-data.mjs              # jours couverts à partir d'aujourd'hui
+//
+// Un pays dont le flux est indisponible est ignoré (avec un avertissement) : les autres
+// sont quand même publiés.
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { unzipSync, strFromU8 } from 'fflate';
+import { Unzip, UnzipInflate } from 'fflate';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const OUT_FILE = join(ROOT, 'site', 'data', 'network.json');
-const TZ = 'Europe/Paris';
-const DAYS = Number(process.env.DAYS || 7);
+const OUT_DIR = join(ROOT, 'site', 'data');
+const DAYS = Number(process.env.DAYS || 3);
+const RAIL = (t) => t === 2 || (t >= 100 && t < 200);
 
-// Flux publiés par SNCF Voyageurs sur transport.data.gouv.fr. On essaie d'abord
-// l'export combiné (TGV + Intercités + TER), puis les exports séparés.
-const DEFAULT_SOURCES = [
-  ['https://eu.ftp.opendatasoft.com/sncf/plandata/Export_OpenData_SNCF_GTFS_NewTripId.zip'],
-  [
-    'https://eu.ftp.opendatasoft.com/sncf/gtfs/export_gtfs_voyages.zip',
-    'https://eu.ftp.opendatasoft.com/sncf/gtfs/export-intercites-gtfs-last.zip',
-    'https://eu.ftp.opendatasoft.com/sncf/gtfs/export-ter-gtfs-last.zip',
-  ],
+// Sources par pays. `sources` est une liste d'alternatives : on prend la première qui
+// fonctionne ; chaque alternative peut regrouper plusieurs flux à fusionner.
+const COUNTRIES = [
+  {
+    id: 'fr',
+    name: 'France',
+    flag: '🇫🇷',
+    tz: 'Europe/Paris',
+    // Les tram-trains SNCF sont publiés en route_type 0.
+    routeTypes: (t) => RAIL(t) || t === 0,
+    typeOf: sncfType,
+    sources: [
+      ['https://eu.ftp.opendatasoft.com/sncf/plandata/Export_OpenData_SNCF_GTFS_NewTripId.zip'],
+      [
+        'https://eu.ftp.opendatasoft.com/sncf/gtfs/export_gtfs_voyages.zip',
+        'https://eu.ftp.opendatasoft.com/sncf/gtfs/export-intercites-gtfs-last.zip',
+        'https://eu.ftp.opendatasoft.com/sncf/gtfs/export-ter-gtfs-last.zip',
+      ],
+    ],
+  },
+  {
+    id: 'de',
+    name: 'Allemagne',
+    flag: '🇩🇪',
+    tz: 'Europe/Berlin',
+    // gtfs.de : grandes lignes (fv) et trains régionaux (rv), sans les transports urbains.
+    sources: [[
+      'https://download.gtfs.de/germany/fv_free/latest.zip',
+      'https://download.gtfs.de/germany/rv_free/latest.zip',
+    ]],
+  },
+  {
+    id: 'ch',
+    name: 'Suisse',
+    flag: '🇨🇭',
+    tz: 'Europe/Zurich',
+    // Flux national complet (tous modes, très volumineux) : on ne garde que le train.
+    sources: [
+      [`https://opentransportdata.swiss/fr/dataset/timetable-${new Date().getFullYear()}-gtfs2020/permalink`],
+      [`https://opentransportdata.swiss/de/dataset/timetable-${new Date().getFullYear()}-gtfs2020/permalink`],
+    ],
+  },
+  {
+    id: 'be',
+    name: 'Belgique',
+    flag: '🇧🇪',
+    tz: 'Europe/Brussels',
+    sources: [['https://sncb-opendata.hafas.de/gtfs/static/c21ac6758dd25af84cca5b707f3cb3de']],
+  },
+  {
+    id: 'nl',
+    name: 'Pays-Bas',
+    flag: '🇳🇱',
+    tz: 'Europe/Amsterdam',
+    sources: [['https://gtfs.ovapi.nl/nl/gtfs-nl.zip'], ['http://gtfs.ovapi.nl/nl/gtfs-nl.zip']],
+  },
+  {
+    id: 'es',
+    name: 'Espagne',
+    flag: '🇪🇸',
+    tz: 'Europe/Madrid',
+    // Renfe : grandes lignes / moyenne distance, puis Cercanías.
+    sources: [
+      [
+        'https://ssl.renfe.com/gtransit/Fichero_AV_LD/google_transit.zip',
+        'https://ssl.renfe.com/ftransit/Fichero_CER_FOMENTO/fomento_transit.zip',
+      ],
+      ['https://ssl.renfe.com/gtransit/Fichero_AV_LD/google_transit.zip'],
+    ],
+  },
 ];
 
 // ---------------------------------------------------------------------------
-// Lecture des flux
+// Catégories de trains (pour les couleurs et les filtres)
 
-async function loadFeeds() {
-  if (process.env.GTFS_FILES) {
-    const files = process.env.GTFS_FILES.split(/\s+/).filter(Boolean);
-    return Promise.all(files.map(async (f) => ({ name: f, zip: unzip(await readFile(f)) })));
-  }
-  const candidates = process.env.GTFS_URLS
-    ? [process.env.GTFS_URLS.split(/\s+/).filter(Boolean)]
-    : DEFAULT_SOURCES;
-
-  let lastError;
-  for (const urls of candidates) {
-    try {
-      const feeds = [];
-      for (const url of urls) {
-        console.log(`Téléchargement de ${url}`);
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`${url} : HTTP ${res.status}`);
-        feeds.push({ name: url, zip: unzip(new Uint8Array(await res.arrayBuffer())) });
-      }
-      return feeds;
-    } catch (err) {
-      console.warn(`  échec : ${err.message}`);
-      lastError = err;
-    }
-  }
-  throw lastError;
+const CATEGORY_RULES = [
+  ['hs', /^(TGV|OUIGO$|ICE|AVE$|AVLO$|IRYO|LYRIA|EUROSTAR|THALYS|ECE$|FRECCIA|RJX$)/i],
+  ['gl', /^(INTERCIT|IC$|EC$|EN$|NJ$|NIGHTJET|IR$|ICN$|ICD$|ALVIA|EUROMED|FLX$|D$|RJ$|INTERREGIO|LD$|TRENHOTEL|EUROCITY)/i],
+  ['sub', /^(S$|S-BAHN|SBAHN|RER|SN$|C$|TRANSILIEN|CERCAN|RODALIES|SPR$|SPRINTER)/i],
+];
+function category(type) {
+  const t = type.trim();
+  if (/^OUIGO TRAIN CLASSIQUE/i.test(t)) return 'gl';
+  for (const [cat, re] of CATEGORY_RULES) if (re.test(t)) return cat;
+  return 'reg';
 }
 
-function unzip(buf) {
-  // Certains exports rangent les fichiers dans un sous-dossier : on indexe par nom de base.
-  const files = unzipSync(buf, { filter: (f) => f.name.endsWith('.txt') });
-  const out = {};
-  for (const [path, data] of Object.entries(files)) out[path.split('/').pop()] = data;
+// SNCF : le type est dans l'identifiant d'arrêt, ex. « StopPoint:OCETGV INOUI-87686006 ».
+function sncfType(stopId, route, agencyName) {
+  const m = /OCE(.+)-[^-]+$/.exec(stopId || '');
+  let t = m ? m[1].trim() : '';
+  if (!t || /^\d+$/.test(t)) t = route.route_desc || agencyName || 'Train';
+  t = t.replace(/^Train /i, '');
+  if (/^INTERCIT/i.test(t)) t = /nuit/i.test(t) ? 'Intercités de nuit' : 'Intercités';
+  if (/^TER/i.test(t)) t = 'TER';
+  return t;
+}
+
+// Cas général : préfixe alphabétique du nom court de la ligne (« ICE 23 » → ICE,
+// « RE1 » → RE, « S 3 » → S), sinon description de la ligne, sinon l'opérateur.
+function genericType(stopId, route, agencyName) {
+  for (const s of [route.route_short_name, route.route_desc, route.route_long_name]) {
+    const m = /^\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ-]*)/.exec(s || '');
+    if (m && m[1].length <= 14) return m[1].length <= 4 ? m[1].toUpperCase() : m[1];
+  }
+  return agencyName || 'Train';
+}
+
+// ---------------------------------------------------------------------------
+// Lecture des zip GTFS en flux (certains fichiers dépassent le gigaoctet décompressé)
+
+async function download(url) {
+  console.log(`  ↓ ${url}`);
+  const res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'train-view (GTFS)' } });
+  if (!res.ok) throw new Error(`${url} : HTTP ${res.status}`);
+  const buf = new Uint8Array(await res.arrayBuffer());
+  if (buf[0] !== 0x50 || buf[1] !== 0x4b) throw new Error(`${url} : ce n'est pas un fichier zip`);
+  console.log(`    ${(buf.length / 1e6).toFixed(1)} Mo`);
+  return buf;
+}
+
+// Lit le fichier `name` du zip et appelle onRow(champs, entêtes) pour chaque ligne CSV.
+function readCsv(zip, name, onRow) {
+  let found = false;
+  const csv = new CsvStream(onRow);
+  const uz = new Unzip();
+  uz.register(UnzipInflate);
+  uz.onfile = (file) => {
+    if (file.name.split('/').pop() !== name) return;
+    found = true;
+    file.ondata = (err, chunk, final) => {
+      if (err) throw err;
+      csv.push(chunk, final);
+    };
+    file.start();
+  };
+  const STEP = 1 << 20;
+  for (let i = 0; i < zip.length; i += STEP) uz.push(zip.subarray(i, i + STEP), i + STEP >= zip.length);
+  return found;
+}
+
+// Analyseur CSV incrémental (RFC 4180) : reçoit des morceaux d'octets.
+class CsvStream {
+  constructor(onRow) {
+    this.onRow = onRow;
+    this.decoder = new TextDecoder('utf-8');
+    this.rest = '';
+    this.header = null;
+  }
+
+  push(chunk, final) {
+    let text = this.rest + this.decoder.decode(chunk, { stream: !final });
+    if (!this.header && text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    let start = 0;
+    let quotes = 0;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 34) quotes++;
+      else if (c === 10 && quotes % 2 === 0) {
+        this.line(text.slice(start, i));
+        start = i + 1;
+        quotes = 0;
+      }
+    }
+    this.rest = text.slice(start);
+    if (final && this.rest) { this.line(this.rest); this.rest = ''; }
+  }
+
+  line(l) {
+    if (l.endsWith('\r')) l = l.slice(0, -1);
+    if (!l) return;
+    const fields = l.includes('"') ? splitQuoted(l) : l.split(',');
+    if (!this.header) {
+      this.header = {};
+      fields.forEach((h, i) => { this.header[h.trim()] = i; });
+      return;
+    }
+    this.onRow(fields, this.header);
+  }
+}
+
+function splitQuoted(l) {
+  const out = [];
+  let field = '';
+  let q = false;
+  for (let i = 0; i < l.length; i++) {
+    const c = l[i];
+    if (q) {
+      if (c === '"') {
+        if (l[i + 1] === '"') { field += '"'; i++; } else q = false;
+      } else field += c;
+    } else if (c === '"') q = true;
+    else if (c === ',') { out.push(field); field = ''; }
+    else field += c;
+  }
+  out.push(field);
   return out;
 }
 
-// Parse un CSV GTFS (RFC 4180) et appelle onRow(objet) pour chaque ligne.
-function parseCsv(u8, onRow) {
-  if (!u8) return;
-  let text = strFromU8(u8);
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  let header = null;
-  let row = [];
-  let field = '';
-  let i = 0;
-  const n = text.length;
-
-  const endRow = () => {
-    row.push(field);
-    field = '';
-    if (!header) {
-      header = row.map((h) => h.trim());
-    } else if (row.length > 1 || row[0] !== '') {
-      const obj = {};
-      for (let k = 0; k < header.length; k++) obj[header[k]] = row[k] ?? '';
-      onRow(obj);
-    }
-    row = [];
-  };
-
-  while (i < n) {
-    const c = text[i];
-    if (c === '"') {
-      i++;
-      while (i < n) {
-        if (text[i] === '"') {
-          if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
-          i++;
-          break;
-        }
-        field += text[i++];
-      }
-    } else if (c === ',') {
-      row.push(field); field = ''; i++;
-    } else if (c === '\n' || c === '\r') {
-      endRow();
-      if (c === '\r' && text[i + 1] === '\n') i++;
-      i++;
-    } else {
-      field += c; i++;
-    }
-  }
-  if (field !== '' || row.length) endRow();
-}
+// Lecture d'une ligne par nom de colonne.
+const col = (f, h, name) => (h[name] === undefined ? '' : f[h[name]] ?? '');
+const rowObj = (f, h) => {
+  const o = {};
+  for (const k in h) o[k] = f[h[k]] ?? '';
+  return o;
+};
 
 // ---------------------------------------------------------------------------
 // Dates
 
-function parisDate(offsetDays = 0) {
+function dateIn(tz, offsetDays = 0) {
   const d = new Date(Date.now() + offsetDays * 86400000);
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
-    .formatToParts(d);
-  const get = (t) => parts.find((p) => p.type === t).value;
-  return `${get('year')}${get('month')}${get('day')}`;
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .formatToParts(d).map((x) => [x.type, x.value]));
+  return `${p.year}${p.month}${p.day}`;
 }
 
 function weekday(yyyymmdd) {
@@ -135,100 +247,85 @@ function weekday(yyyymmdd) {
 const toMinutes = (t) => {
   if (!t) return null;
   const [h, m, s] = t.trim().split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
   return h * 60 + m + Math.round((s || 0) / 60);
 };
 
 // ---------------------------------------------------------------------------
-// Type de train (TGV INOUI, OUIGO, TER…)
+// Construction d'un pays
 
-function trainType(stopId, route, agencyName) {
-  // Les identifiants SNCF ressemblent à « StopPoint:OCETGV INOUI-87686006 ».
-  const m = /OCE(.+)-[^-]+$/.exec(stopId || '');
-  let t = m ? m[1].trim() : '';
-  if (!t || /^\d+$/.test(t)) t = route?.route_desc || agencyName || 'Train';
-  t = t.replace(/^Train /i, '');
-  if (/^INTERCIT/i.test(t)) t = /nuit/i.test(t) ? 'Intercités de nuit' : 'Intercités';
-  if (/^TER/i.test(t)) t = 'TER';
-  return t;
+async function loadFeeds(country) {
+  if (process.env.GTFS_FILES) {
+    // « a.zip b.zip » (un seul pays) ou « fr:a.zip de:b.zip ».
+    const files = process.env.GTFS_FILES.split(/\s+/).filter(Boolean)
+      .map((f) => /^[a-z]{2}:/.test(f) ? f : `${country.id}:${f}`)
+      .filter((f) => f.startsWith(`${country.id}:`))
+      .map((f) => f.slice(3));
+    if (!files.length) throw new Error('aucun fichier GTFS_FILES pour ce pays');
+    return Promise.all(files.map(async (f) => ({ name: f, zip: new Uint8Array(await readFile(f)) })));
+  }
+  let lastError;
+  for (const urls of country.sources) {
+    try {
+      const feeds = [];
+      for (const url of urls) feeds.push({ name: url, zip: await download(url) });
+      return feeds;
+    } catch (err) {
+      console.warn(`  échec : ${err.message}`);
+      lastError = err;
+    }
+  }
+  throw lastError;
 }
 
-const RAIL_ROUTE_TYPES = (type) => {
-  const n = Number(type);
-  return n === 0 || n === 1 || n === 2 || (n >= 100 && n < 200) || n === 900;
-};
-
-// ---------------------------------------------------------------------------
-
-async function main() {
+async function buildCountry(country) {
+  console.log(`\n== ${country.flag} ${country.name}`);
   const dates = [];
-  for (let d = -1; d < DAYS; d++) dates.push(parisDate(d));
+  for (let d = -1; d < DAYS; d++) dates.push(dateIn(country.tz, d));
   const dateIndex = new Map(dates.map((d, i) => [d, i]));
+  const keepRoute = country.routeTypes || RAIL;
+  const typeOf = country.typeOf || genericType;
 
-  const feeds = await loadFeeds();
+  const feeds = await loadFeeds(country);
 
   const stops = [];           // [nom, lat, lon]
   const stopKeyIndex = new Map();
   const types = [];
   const typeIndex = new Map();
-  const serviceKeys = new Map(); // "0,1,2" -> index
+  const serviceKeys = new Map();
   const services = [];
   const trips = [];
   const seenTrips = new Set();
 
-  feeds.forEach((feed, feedNo) => {
-    const { zip } = feed;
-
-    // Agences et lignes
+  for (const { name, zip } of feeds) {
     const agencies = new Map();
-    parseCsv(zip['agency.txt'], (r) => agencies.set(r.agency_id, r.agency_name));
+    readCsv(zip, 'agency.txt', (f, h) => agencies.set(col(f, h, 'agency_id'), col(f, h, 'agency_name')));
+    const defaultAgency = agencies.size === 1 ? [...agencies.values()][0] : '';
+
     const routes = new Map();
-    parseCsv(zip['routes.txt'], (r) => {
-      if (RAIL_ROUTE_TYPES(r.route_type)) routes.set(r.route_id, r);
+    readCsv(zip, 'routes.txt', (f, h) => {
+      if (keepRoute(Number(col(f, h, 'route_type')))) routes.set(col(f, h, 'route_id'), rowObj(f, h));
     });
+    if (!routes.size) { console.warn(`  ${name} : aucune ligne ferroviaire`); continue; }
 
-    // Arrêts : on regroupe les points d'arrêt sur leur gare parente.
-    const rawStops = new Map();
-    parseCsv(zip['stops.txt'], (r) => rawStops.set(r.stop_id, r));
-    const stopIdx = new Map();
-    const resolveStop = (id) => {
-      if (stopIdx.has(id)) return stopIdx.get(id);
-      const s = rawStops.get(id);
-      if (!s) return -1;
-      const parent = s.parent_station && rawStops.get(s.parent_station);
-      const ref = parent && parent.stop_lat ? parent : s;
-      const lat = Number(ref.stop_lat);
-      const lon = Number(ref.stop_lon);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) { stopIdx.set(id, -1); return -1; }
-      // Une même gare peut apparaître dans plusieurs flux : on fusionne sur nom + coordonnées arrondies.
-      const key = `${ref.stop_name}|${lat.toFixed(3)}|${lon.toFixed(3)}`;
-      let idx = stopKeyIndex.get(key);
-      if (idx === undefined) {
-        idx = stops.length;
-        stops.push([ref.stop_name.replace(/^gare de /i, ''), +lat.toFixed(5), +lon.toFixed(5)]);
-        stopKeyIndex.set(key, idx);
-      }
-      stopIdx.set(id, idx);
-      return idx;
-    };
-
-    // Calendriers -> liste des jours (indices dans `dates`) où le service roule.
+    // Calendriers -> jours (indices dans `dates`) où chaque service circule.
     const serviceDays = new Map();
-    parseCsv(zip['calendar.txt'], (r) => {
+    readCsv(zip, 'calendar.txt', (f, h) => {
+      const r = rowObj(f, h);
       const days = new Set();
       for (const d of dates) {
         if (d >= r.start_date && d <= r.end_date && r[weekday(d)] === '1') days.add(dateIndex.get(d));
       }
       serviceDays.set(r.service_id, days);
     });
-    parseCsv(zip['calendar_dates.txt'], (r) => {
-      if (!dateIndex.has(r.date)) {
-        if (!serviceDays.has(r.service_id)) serviceDays.set(r.service_id, new Set());
-        return;
-      }
-      let days = serviceDays.get(r.service_id);
-      if (!days) serviceDays.set(r.service_id, (days = new Set()));
-      if (r.exception_type === '1') days.add(dateIndex.get(r.date));
-      else if (r.exception_type === '2') days.delete(dateIndex.get(r.date));
+    readCsv(zip, 'calendar_dates.txt', (f, h) => {
+      const sid = col(f, h, 'service_id');
+      let days = serviceDays.get(sid);
+      if (!days) serviceDays.set(sid, (days = new Set()));
+      const di = dateIndex.get(col(f, h, 'date'));
+      if (di === undefined) return;
+      if (col(f, h, 'exception_type') === '1') days.add(di);
+      else days.delete(di);
     });
     const serviceIndexFor = (serviceId) => {
       const days = serviceDays.get(serviceId);
@@ -245,69 +342,154 @@ async function main() {
 
     // Courses ferroviaires circulant dans la fenêtre de dates.
     const feedTrips = new Map();
-    parseCsv(zip['trips.txt'], (r) => {
-      const route = routes.get(r.route_id);
+    readCsv(zip, 'trips.txt', (f, h) => {
+      const route = routes.get(col(f, h, 'route_id'));
       if (!route) return;
-      const service = serviceIndexFor(r.service_id);
+      const service = serviceIndexFor(col(f, h, 'service_id'));
       if (service < 0) return;
-      feedTrips.set(r.trip_id, { r, route, service, stops: [] });
+      feedTrips.set(col(f, h, 'trip_id'), {
+        route,
+        service,
+        shortName: col(f, h, 'trip_short_name'),
+        headsign: col(f, h, 'trip_headsign'),
+        stops: [],
+      });
     });
 
-    parseCsv(zip['stop_times.txt'], (r) => {
-      const t = feedTrips.get(r.trip_id);
+    // Horaires : seulement pour les courses retenues (on lit les arrêts ensuite).
+    const usedStopIds = new Set();
+    readCsv(zip, 'stop_times.txt', (f, h) => {
+      const t = feedTrips.get(f[h.trip_id]);
       if (!t) return;
-      t.stops.push(r);
+      const stopId = f[h.stop_id];
+      usedStopIds.add(stopId);
+      t.stops.push([Number(f[h.stop_sequence]), stopId, f[h.arrival_time], f[h.departure_time]]);
     });
 
+    // Arrêts : regroupés sur leur gare parente quand elle existe.
+    const rawStops = new Map();
+    const parentIds = new Set();
+    readCsv(zip, 'stops.txt', (f, h) => {
+      const id = col(f, h, 'stop_id');
+      if (!usedStopIds.has(id)) return;
+      const parent = col(f, h, 'parent_station');
+      if (parent) parentIds.add(parent);
+      rawStops.set(id, { name: col(f, h, 'stop_name'), lat: +col(f, h, 'stop_lat'), lon: +col(f, h, 'stop_lon'), parent });
+    });
+    if (parentIds.size) {
+      readCsv(zip, 'stops.txt', (f, h) => {
+        const id = col(f, h, 'stop_id');
+        if (parentIds.has(id)) rawStops.set(id, { name: col(f, h, 'stop_name'), lat: +col(f, h, 'stop_lat'), lon: +col(f, h, 'stop_lon') });
+      });
+    }
+    const stopIdx = new Map();
+    const resolveStop = (id) => {
+      if (stopIdx.has(id)) return stopIdx.get(id);
+      const s = rawStops.get(id);
+      let idx = -1;
+      if (s) {
+        const parent = s.parent && rawStops.get(s.parent);
+        const ref = parent && Number.isFinite(parent.lat) && parent.lat ? parent : s;
+        if (Number.isFinite(ref.lat) && Number.isFinite(ref.lon) && (ref.lat || ref.lon)) {
+          // Une même gare peut apparaître dans plusieurs flux : fusion sur nom + coordonnées arrondies.
+          const key = `${ref.name}|${ref.lat.toFixed(3)}|${ref.lon.toFixed(3)}`;
+          idx = stopKeyIndex.get(key);
+          if (idx === undefined) {
+            idx = stops.length;
+            stops.push([ref.name.replace(/^gare de /i, ''), +ref.lat.toFixed(5), +ref.lon.toFixed(5)]);
+            stopKeyIndex.set(key, idx);
+          }
+        }
+      }
+      stopIdx.set(id, idx);
+      return idx;
+    };
+
+    let kept = 0;
     for (const [tripId, t] of feedTrips) {
       if (t.stops.length < 2) continue;
-      t.stops.sort((a, b) => Number(a.stop_sequence) - Number(b.stop_sequence));
+      t.stops.sort((a, b) => a[0] - b[0]);
       const flat = [];
       let prev = -Infinity;
       let ok = true;
-      for (const st of t.stops) {
-        const idx = resolveStop(st.stop_id);
-        let arr = toMinutes(st.arrival_time);
-        let dep = toMinutes(st.departure_time);
+      for (const [, stopId, arrT, depT] of t.stops) {
+        const idx = resolveStop(stopId);
+        let arr = toMinutes(arrT);
+        let dep = toMinutes(depT);
         if (arr === null) arr = dep;
         if (dep === null) dep = arr;
         if (idx < 0 || arr === null || arr < prev) { ok = false; break; }
+        // Deux arrêts consécutifs dans la même gare (quai différent) : on les fusionne.
+        if (flat.length && flat[flat.length - 3] === idx) { flat[flat.length - 1] = dep; prev = dep; continue; }
         flat.push(idx, arr, dep);
         prev = dep;
       }
       if (!ok || flat.length < 6) continue;
 
-      const number = (t.r.trip_short_name || t.r.trip_headsign || tripId).trim();
-      const type = trainType(t.stops[0].stop_id, t.route, agencies.get(t.route.agency_id));
+      const route = t.route;
+      const type = typeOf(t.stops[0][1], route, agencies.get(route.agency_id) || defaultAgency);
       // Les flux SNCF classent certains autocars (« Car TER »…) comme des lignes ferroviaires.
       if (/^car\b/i.test(type)) continue;
-      // Les flux SNCF dupliquent parfois une même course (ex. train partagé entre deux régions).
+      const number = (t.shortName || route.route_short_name || t.headsign || tripId).trim();
+      const shortName = (route.route_short_name || '').trim();
+      const line = shortName && shortName !== number && shortName !== type ? shortName : '';
+
       const dedupKey = `${number}|${t.service}|${flat.join(',')}`;
       if (seenTrips.has(dedupKey)) continue;
       seenTrips.add(dedupKey);
 
       let ti = typeIndex.get(type);
       if (ti === undefined) { ti = types.length; types.push(type); typeIndex.set(type, ti); }
-      trips.push([number, ti, t.service, flat]);
+      trips.push(line ? [number, ti, t.service, flat, line] : [number, ti, t.service, flat]);
+      kept++;
     }
-    console.log(`${feed.name} : ${feedTrips.size} courses ferroviaires dans la fenêtre`);
-  });
+    console.log(`  ${name} : ${kept} courses retenues`);
+  }
 
-  if (trips.length === 0) throw new Error('Aucune course trouvée : vérifiez les flux GTFS.');
-
-  const out = {
+  if (!trips.length) throw new Error('aucune course trouvée');
+  return {
+    id: country.id,
+    name: country.name,
+    flag: country.flag,
     generated: new Date().toISOString(),
-    timezone: TZ,
+    timezone: country.tz,
     dates,
-    types,
+    types: types.map((t) => [t, category(t)]),
     stops,
     services,
     trips,
   };
-  await mkdir(dirname(OUT_FILE), { recursive: true });
-  const json = JSON.stringify(out);
-  await writeFile(OUT_FILE, json);
-  console.log(`${trips.length} courses, ${stops.length} gares, ${types.length} types -> ${OUT_FILE} (${(json.length / 1e6).toFixed(1)} Mo)`);
+}
+
+// ---------------------------------------------------------------------------
+
+async function main() {
+  const wanted = process.env.COUNTRIES ? process.env.COUNTRIES.split(/[\s,]+/).filter(Boolean) : null;
+  const list = COUNTRIES.filter((c) => !wanted || wanted.includes(c.id));
+  if (process.env.GTFS_FILES && list.length !== 1 && !/(^|\s)[a-z]{2}:/.test(process.env.GTFS_FILES)) {
+    throw new Error('GTFS_FILES sans préfixe de pays nécessite un seul pays (ex. COUNTRIES=fr).');
+  }
+
+  await rm(OUT_DIR, { recursive: true, force: true });
+  await mkdir(OUT_DIR, { recursive: true });
+
+  const index = { generated: new Date().toISOString(), countries: [] };
+  for (const country of list) {
+    try {
+      const data = await buildCountry(country);
+      const json = JSON.stringify(data);
+      const file = `${country.id}.json`;
+      await writeFile(join(OUT_DIR, file), json);
+      index.countries.push({ id: country.id, name: country.name, flag: country.flag, file, trips: data.trips.length });
+      console.log(`  → ${file} : ${data.trips.length} courses, ${data.stops.length} gares (${(json.length / 1e6).toFixed(1)} Mo)`);
+    } catch (err) {
+      console.warn(`  ⚠ ${country.name} ignoré : ${err.message}`);
+    }
+  }
+
+  if (!index.countries.length) throw new Error('Aucun pays n’a pu être généré.');
+  await writeFile(join(OUT_DIR, 'index.json'), JSON.stringify(index, null, 2));
+  console.log(`\nPays publiés : ${index.countries.map((c) => c.name).join(', ')}`);
 }
 
 main().catch((err) => {

@@ -4,26 +4,21 @@
 'use strict';
 
 const TZ = 'Europe/Paris';
-const TYPE_COLORS = {
-  'TGV INOUI': '#8b5cf6',
-  'OUIGO': '#ec4899',
-  'OUIGO Train Classique': '#f472b6',
-  'TER': '#3b82f6',
-  'Intercités': '#14b8a6',
-  'Intercités de nuit': '#6366f1',
-  'Lyria': '#ef4444',
-  'ICE': '#e11d48',
-  'TramTrain': '#22c55e',
-  'Navette': '#f59e0b',
+// Catégories communes à tous les pays (couleurs et filtres).
+const CATEGORIES = {
+  hs: { label: 'Grande vitesse', color: '#8b5cf6' },
+  gl: { label: 'Grandes lignes', color: '#14b8a6' },
+  reg: { label: 'Régional', color: '#3b82f6' },
+  sub: { label: 'Banlieue / S-Bahn', color: '#f59e0b' },
 };
-const FALLBACK_COLORS = ['#eab308', '#06b6d4', '#84cc16', '#f97316', '#a855f7', '#94a3b8'];
 
 const state = {
-  data: null,
+  countries: [],       // pays chargés : { id, name, flag, data }
   trips: [],
-  colors: {},
+  usedStops: [],       // gares desservies (tous pays), pour la carte et la recherche
   active: [],          // trains en circulation : { key, trip, date, offset }
-  hiddenTypes: new Set(),
+  hiddenCats: new Set(),
+  hiddenCountries: new Set(),
   selected: null,      // élément de `active`
   follow: false,
   hover: null,
@@ -31,22 +26,30 @@ const state = {
   pendingNumber: null, // train à sélectionner depuis l'URL
 };
 
+const isHidden = (trip) => state.hiddenCats.has(trip.cat) || state.hiddenCountries.has(trip.country.id);
+
 // ---------------------------------------------------------------------------
-// Temps (heure de Paris)
+// Temps : les horaires GTFS sont exprimés dans le fuseau de chaque pays.
 
-const clockFmt = new Intl.DateTimeFormat('en-CA', {
-  timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
-  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
-});
-
-function parisNow() {
-  const now = Date.now();
-  const p = Object.fromEntries(clockFmt.formatToParts(new Date(now)).map((x) => [x.type, x.value]));
+const formatters = {};
+function timeIn(tz, ms) {
+  const fmt = formatters[tz] || (formatters[tz] = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }));
+  const p = Object.fromEntries(fmt.formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
   return {
     date: `${p.year}${p.month}${p.day}`,
-    minutes: +p.hour * 60 + +p.minute + (+p.second + (now % 1000) / 1000) / 60,
+    minutes: +p.hour * 60 + +p.minute + (+p.second + (ms % 1000) / 1000) / 60,
     label: `${p.hour}:${p.minute}:${p.second}`,
   };
+}
+
+// Instantané de l'heure courante, décliné par fuseau à la demande.
+function clock() {
+  const ms = Date.now();
+  const cache = {};
+  return { in: (tz) => cache[tz] || (cache[tz] = timeIn(tz, ms)) };
 }
 
 function shiftDate(yyyymmdd, days) {
@@ -83,7 +86,7 @@ function positionAt(trip, t) {
   const f = trip.flat;
   const n = f.length / 3;
   if (t < f[2] || t > f[f.length - 2]) return null;
-  const stops = state.data.stops;
+  const stops = trip.S;
   for (let i = 0; i < n; i++) {
     const dep = f[i * 3 + 2];
     if (t <= dep) {
@@ -107,7 +110,7 @@ function positionAt(trip, t) {
 // Distances cumulées (km) le long du trajet, calculées à la demande.
 function cumulativeKm(trip) {
   if (trip.cum) return trip.cum;
-  const stops = state.data.stops;
+  const stops = trip.S;
   const cum = [0];
   for (let i = 3; i < trip.flat.length; i += 3) {
     cum.push(cum[cum.length - 1] + haversine(stops[trip.flat[i - 3]], stops[trip.flat[i]]));
@@ -115,7 +118,7 @@ function cumulativeKm(trip) {
   return (trip.cum = cum);
 }
 
-const tNow = (item, now) => now.minutes + item.offset;
+const tNow = (item, now) => now.in(item.trip.tz).minutes + item.offset;
 
 // ---------------------------------------------------------------------------
 // Carte
@@ -137,7 +140,7 @@ function addTiles() {
   const layer = L.tileLayer(src.url, {
     maxZoom: src.maxZoom,
     subdomains: src.subdomains || 'abc',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Horaires SNCF (GTFS)',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · Horaires : SNCF, DB (gtfs.de), CFF, SNCB, OVapi, Renfe (GTFS)',
   }).addTo(map);
   layer.on('tileerror', () => {
     if (++tileErrors < 6 || tileSource >= TILE_SOURCES.length - 1) return;
@@ -156,7 +159,7 @@ addTiles();
     map.setView([+m[1], +m[2]], +m[3]);
     if (m[4]) state.pendingNumber = decodeURIComponent(m[4]);
   } else {
-    map.setView([46.6, 2.4], 6);
+    map.setView([47, 5], 5);
   }
 })();
 
@@ -221,8 +224,8 @@ function bearing(trip, pos) {
   const n = f.length / 3;
   let i = pos.seg;
   if (i >= n - 1) i = n - 2;
-  const a = state.data.stops[f[i * 3]];
-  const b = state.data.stops[f[(i + 1) * 3]];
+  const a = trip.S[f[i * 3]];
+  const b = trip.S[f[(i + 1) * 3]];
   const pa = map.latLngToContainerPoint([a[1], a[2]]);
   const pb = map.latLngToContainerPoint([b[1], b[2]]);
   return Math.atan2(pb.x - pa.x, -(pb.y - pa.y));
@@ -231,11 +234,10 @@ function bearing(trip, pos) {
 function draw() {
   const size = map.getSize();
   ctx.clearRect(0, 0, size.x, size.y);
-  if (!state.data) return;
-  const now = parisNow();
+  if (!state.trips.length) return;
+  const now = clock();
   const zoom = map.getZoom();
   const bounds = map.getBounds().pad(0.1);
-  const stops = state.data.stops;
 
   // Gares, visibles à partir d'un certain zoom.
   if (zoom >= 8) {
@@ -264,11 +266,11 @@ function draw() {
   const drawn = [];
   for (const item of state.active) {
     if (item === sel) continue;
-    if (state.hiddenTypes.has(item.trip.type)) continue;
+    if (isHidden(item.trip)) continue;
     const pos = positionAt(item.trip, tNow(item, now));
     if (!pos || !bounds.contains([pos.lat, pos.lon])) continue;
     const p = map.latLngToContainerPoint([pos.lat, pos.lon]);
-    drawTrain(p, bearing(item.trip, pos), icon, state.colors[item.trip.type], item === state.hover);
+    drawTrain(p, bearing(item.trip, pos), icon, item.trip.color, item === state.hover);
     drawn.push({ x: p.x, y: p.y, item });
   }
   if (sel && selPos) {
@@ -300,14 +302,14 @@ function drawTrain(p, angle, icon, color, highlight, stroke = '#fff') {
 
 function drawRoute(trip, pos) {
   const f = trip.flat;
-  const stops = state.data.stops;
+  const stops = trip.S;
   const pts = [];
   for (let i = 0; i < f.length; i += 3) {
     const s = stops[f[i]];
     pts.push(map.latLngToContainerPoint([s[1], s[2]]));
   }
   const cur = map.latLngToContainerPoint([pos.lat, pos.lon]);
-  const color = state.colors[trip.type];
+  const color = trip.color;
 
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -374,7 +376,7 @@ map.on('mousemove', (e) => {
   if (item !== state.hover) { state.hover = item; dirty = true; }
   if (item) {
     const t = item.trip;
-    tooltip.innerHTML = `<b>${escapeHtml(t.number)}</b> ${escapeHtml(t.type)} · ${escapeHtml(t.origin)} → ${escapeHtml(t.destination)}`;
+    tooltip.innerHTML = `${t.country.flag} <b>${escapeHtml(t.number)}</b> ${escapeHtml(t.label)} · ${escapeHtml(t.origin)} → ${escapeHtml(t.destination)}`;
     const rect = map.getContainer().getBoundingClientRect();
     tooltip.style.left = `${rect.left + hit.x}px`;
     tooltip.style.top = `${rect.top + hit.y}px`;
@@ -395,70 +397,110 @@ map.on('dragstart', () => { if (state.follow) setFollow(false); });
 // ---------------------------------------------------------------------------
 // Données
 
-async function load() {
-  let res = null;
+async function fetchJson(url) {
   try {
-    res = await fetch('data/network.json', { cache: 'no-cache' });
+    const res = await fetch(url, { cache: 'no-cache' });
+    return res.ok ? await res.json() : null;
   } catch {
-    // Ouverture en file:// ou réseau indisponible : géré ci-dessous.
+    // Ouverture en file:// ou réseau indisponible : géré par l'appelant.
+    return null;
   }
-  if (!res || !res.ok) {
+}
+
+// Charge l'index des pays, puis chaque pays en parallèle : les trains apparaissent
+// au fur et à mesure que les fichiers arrivent.
+async function load() {
+  const index = await fetchJson('data/index.json');
+  if (!index) {
     setStatus('Horaires introuvables. Générez-les avec <code>npm run data</code> puis ouvrez le site via <code>npm run serve</code>.');
     return;
   }
-  const data = await res.json();
-  state.data = data;
+  setStatus(`Chargement des horaires (${index.countries.map((c) => c.flag).join(' ')})…`);
+  buildFilters(index.countries);
+  setInterval(refreshActive, 1000);
+  requestAnimationFrame(loop);
+
+  let pending = index.countries.length;
+  await Promise.all(index.countries.map(async (c) => {
+    const data = await fetchJson(`data/${c.file}`);
+    pending--;
+    if (data) addCountry(c, data);
+    if (pending) setStatus(`Chargement des horaires… (${index.countries.length - pending}/${index.countries.length})`);
+  }));
+  state.allLoaded = true;
+  setStatus(null);
+  checkDates();
+  refreshActive();
+}
+
+function addCountry(meta, data) {
+  const country = { id: meta.id, name: meta.name, flag: meta.flag, data };
+  state.countries.push(country);
   const stops = data.stops;
   const used = new Set();
-  state.trips = data.trips.map(([number, type, service, flat], i) => {
+  const days = data.services.map((svc) => new Set(svc.map((d) => data.dates[d])));
+  for (const [number, typeIdx, service, flat, line] of data.trips) {
     for (let k = 0; k < flat.length; k += 3) used.add(flat[k]);
-    return {
-      id: i,
+    const [type, cat] = data.types[typeIdx];
+    // Libellé affiché : type + numéro de ligne quand il apporte quelque chose (« RE 1 », « S 3 »).
+    const label = line && line.replace(/\s+/g, '').toUpperCase() !== type.toUpperCase() && line.toUpperCase().startsWith(type.toUpperCase())
+      ? line : type;
+    state.trips.push({
+      id: state.trips.length,
       number,
-      type: data.types[type],
-      days: new Set(data.services[service].map((d) => data.dates[d])),
+      type,
+      label,
+      cat,
+      color: CATEGORIES[cat].color,
+      country,
+      tz: data.timezone,
+      S: stops,
+      days: days[service],
       flat,
       origin: stops[flat[0]][0],
       destination: stops[flat[flat.length - 3]][0],
-    };
-  });
-  state.usedStops = [...used].map((i) => stops[i]);
-
-  let extra = 0;
-  for (const t of data.types) state.colors[t] = TYPE_COLORS[t] || FALLBACK_COLORS[extra++ % FALLBACK_COLORS.length];
-
-  const today = parisNow().date;
-  if (!data.dates.includes(today)) {
-    setStatus(`Les horaires chargés couvrent du ${fmtDate(data.dates[1])} au ${fmtDate(data.dates.at(-1))}, pas aujourd'hui. Régénérez les données avec <code>npm run data</code>.`);
+    });
   }
-  buildFilters();
+  for (const i of used) state.usedStops.push(stops[i]);
   refreshActive();
-  setInterval(refreshActive, 1000);
-  requestAnimationFrame(loop);
+}
+
+function checkDates() {
+  const now = clock();
+  const stale = state.countries.filter((c) => !c.data.dates.includes(now.in(c.data.timezone).date));
+  if (stale.length) {
+    setStatus(`Horaires périmés pour ${stale.map((c) => c.name).join(', ')}. Régénérez les données avec <code>npm run data</code>.`);
+  }
 }
 
 // Liste des trains en circulation, recalculée chaque seconde.
 function refreshActive() {
-  const now = parisNow();
-  document.getElementById('clock').textContent = now.label;
+  const now = clock();
+  document.getElementById('clock').textContent = now.in(TZ).label;
 
   // Un train parti la veille au soir peut encore rouler après minuit (horaires GTFS > 24:00).
-  const days = [
-    { date: now.date, offset: 0 },
-    { date: shiftDate(now.date, -1), offset: 1440 },
-  ];
+  const daysByTz = {};
+  const daysFor = (tz) => {
+    if (daysByTz[tz]) return daysByTz[tz];
+    const c = now.in(tz);
+    return (daysByTz[tz] = [
+      { date: c.date, offset: 0, minutes: c.minutes },
+      { date: shiftDate(c.date, -1), offset: 1440, minutes: c.minutes },
+    ]);
+  };
   const previous = new Map(state.active.map((a) => [a.key, a]));
   const active = [];
   const counts = {};
   for (const trip of state.trips) {
-    for (const { date, offset } of days) {
+    for (const { date, offset, minutes } of daysFor(trip.tz)) {
       if (!trip.days.has(date)) continue;
-      const t = now.minutes + offset;
+      const t = minutes + offset;
       if (t < trip.flat[2] || t > trip.flat[trip.flat.length - 2]) continue;
       const key = `${trip.id}:${date}`;
       // On réutilise l'objet existant pour garder la sélection et le survol.
       active.push(previous.get(key) || { key, trip, date, offset });
-      counts[trip.type] = (counts[trip.type] || 0) + 1;
+      counts[trip.cat] = (counts[trip.cat] || 0) + 1;
+      counts[trip.country.id] = (counts[trip.country.id] || 0) + 1;
     }
   }
   state.active = active;
@@ -470,11 +512,11 @@ function refreshActive() {
   }
   if (state.pendingNumber) {
     const item = active.find((a) => a.trip.number === state.pendingNumber);
-    state.pendingNumber = null;
+    if (item || state.allLoaded) state.pendingNumber = null;
     if (item) select(item, { pan: false });
   }
 
-  const visible = active.filter((a) => !state.hiddenTypes.has(a.trip.type)).length;
+  const visible = active.filter((a) => !isHidden(a.trip)).length;
   document.getElementById('count').textContent = visible.toLocaleString('fr-FR');
   updateFilterCounts(counts);
 
@@ -489,32 +531,39 @@ function refreshActive() {
 }
 
 // ---------------------------------------------------------------------------
-// Filtres par type
+// Filtres : catégories de trains et pays
 
-function buildFilters() {
+function buildFilters(countries) {
   const box = document.getElementById('filters');
   box.innerHTML = '';
-  for (const type of state.data.types) {
+  const add = (key, set, html) => {
     const b = document.createElement('button');
     b.className = 'chip';
-    b.dataset.type = type;
+    b.dataset.key = key;
     b.title = 'Afficher / masquer';
-    b.innerHTML = `<span class="dot" style="background:${state.colors[type]}"></span><span class="label">${escapeHtml(type)}</span><span class="n">0</span>`;
+    b.innerHTML = `${html}<span class="n">0</span>`;
     b.addEventListener('click', () => {
-      if (state.hiddenTypes.has(type)) state.hiddenTypes.delete(type);
-      else state.hiddenTypes.add(type);
-      b.classList.toggle('off', state.hiddenTypes.has(type));
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
+      b.classList.toggle('off', set.has(key));
       refreshActive();
     });
     box.appendChild(b);
+  };
+  for (const [key, c] of Object.entries(CATEGORIES)) {
+    add(key, state.hiddenCats, `<span class="dot" style="background:${c.color}"></span><span class="label">${c.label}</span>`);
+  }
+  if (countries.length > 1) {
+    box.appendChild(Object.assign(document.createElement('div'), { className: 'sep' }));
+    for (const c of countries) {
+      add(c.id, state.hiddenCountries, `<span class="flag">${c.flag}</span><span class="label">${escapeHtml(c.name)}</span>`);
+    }
   }
 }
 
 function updateFilterCounts(counts) {
   for (const b of document.querySelectorAll('#filters .chip')) {
-    const n = counts[b.dataset.type] || 0;
-    b.querySelector('.n').textContent = n.toLocaleString('fr-FR');
-    b.classList.toggle('hidden', n === 0 && !state.hiddenTypes.has(b.dataset.type));
+    b.querySelector('.n').textContent = (counts[b.dataset.key] || 0).toLocaleString('fr-FR');
   }
 }
 
@@ -530,7 +579,7 @@ const normalize = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(
 
 function runSearch() {
   const q = normalize(searchInput.value.trim());
-  if (!q || !state.data) { resultsBox.classList.add('hidden'); results = []; return; }
+  if (!q || !state.trips.length) { resultsBox.classList.add('hidden'); results = []; return; }
 
   const trains = [];
   for (const a of state.active) {
@@ -562,7 +611,7 @@ function renderResults() {
   resultsBox.innerHTML = results.map((r, i) => {
     if (r.kind === 'train') {
       const t = r.item.trip;
-      return `<li data-i="${i}" class="${i === resultIdx ? 'active' : ''}"><span class="tag" style="background:${state.colors[t.type]}">${escapeHtml(t.number)}</span><span class="main">${escapeHtml(t.origin)} → ${escapeHtml(t.destination)} <small>${escapeHtml(t.type)}</small></span></li>`;
+      return `<li data-i="${i}" class="${i === resultIdx ? 'active' : ''}"><span class="tag" style="background:${t.color}">${escapeHtml(t.number)}</span><span class="main">${t.country.flag} ${escapeHtml(t.origin)} → ${escapeHtml(t.destination)} <small>${escapeHtml(t.label)}</small></span></li>`;
     }
     return `<li data-i="${i}" class="${i === resultIdx ? 'active' : ''}"><span class="tag" style="background:#4b5563">Gare</span><span class="main">${escapeHtml(r.stop[0])}</span></li>`;
   }).join('');
@@ -612,7 +661,7 @@ function select(item, { pan = true, zoom } = {}) {
   panel.classList.remove('hidden');
   renderPanel();
   if (pan) {
-    const pos = positionAt(item.trip, tNow(item, parisNow()));
+    const pos = positionAt(item.trip, tNow(item, clock()));
     if (pos) {
       if (zoom) map.flyTo(visibleCenter([pos.lat, pos.lon], zoom), zoom, { duration: 1 });
       else if (!visibleBounds().contains([pos.lat, pos.lon])) map.panTo(visibleCenter([pos.lat, pos.lon]));
@@ -668,7 +717,7 @@ panel.addEventListener('click', (e) => {
   } else if (action === 'route') {
     const pts = [];
     const f = state.selected.trip.flat;
-    for (let i = 0; i < f.length; i += 3) { const s = state.data.stops[f[i]]; pts.push([s[1], s[2]]); }
+    for (let i = 0; i < f.length; i += 3) { const s = state.selected.trip.S[f[i]]; pts.push([s[1], s[2]]); }
     setFollow(false);
     const wide = innerWidth > 720;
     map.flyToBounds(pts, {
@@ -677,7 +726,7 @@ panel.addEventListener('click', (e) => {
       duration: 1,
     });
   } else if (li) {
-    const s = state.data.stops[+li.dataset.stop];
+    const s = state.selected.trip.S[+li.dataset.stop];
     setFollow(false);
     const z = Math.max(map.getZoom(), 11);
     map.flyTo(visibleCenter([s[1], s[2]], z), z, { duration: 1 });
@@ -688,15 +737,15 @@ function renderPanel() {
   const item = state.selected;
   if (!item) return;
   const { trip } = item;
-  const now = parisNow();
+  const now = clock();
   const t = tNow(item, now);
   const pos = positionAt(trip, t);
   if (!pos) return;
 
   const f = trip.flat;
   const n = f.length / 3;
-  const stops = state.data.stops;
-  const color = state.colors[trip.type];
+  const stops = trip.S;
+  const color = trip.color;
   const cum = cumulativeKm(trip);
   const total = cum[n - 1];
   const done = pos.atStop ? cum[pos.seg] : cum[pos.seg] + (cum[pos.seg + 1] - cum[pos.seg]) * pos.k;
@@ -729,7 +778,7 @@ function renderPanel() {
   const following = state.follow ? 'on' : '';
   panel.innerHTML = `
     <div class="ph" style="background:${color}">
-      <div><div class="num">${escapeHtml(trip.number)}</div><div class="sub">${escapeHtml(trip.type)}</div></div>
+      <div><div class="num">${escapeHtml(trip.number)}</div><div class="sub">${trip.country.flag} ${escapeHtml(trip.label)} · ${CATEGORIES[trip.cat].label}</div></div>
       <button data-action="close" aria-label="Fermer">×</button>
     </div>
     <div class="section">
