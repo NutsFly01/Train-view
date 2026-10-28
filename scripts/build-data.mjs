@@ -87,10 +87,77 @@ const COUNTRIES = [
         'https://ssl.renfe.com/gtransit/Fichero_AV_LD/google_transit.zip',
         'https://ssl.renfe.com/ftransit/Fichero_CER_FOMENTO/fomento_transit.zip',
       ],
-      ['https://ssl.renfe.com/gtransit/Fichero_AV_LD/google_transit.zip'],
     ],
   },
+  {
+    id: 'at',
+    name: 'Autriche',
+    flag: '🇦🇹',
+    tz: 'Europe/Vienna',
+    // ÖBB : le nom du fichier contient l'année de l'horaire.
+    sources: yearly((y) => [`https://static.oebb.at/open-data/soll-fahrplan-gtfs/GTFS_OP_${y}_obb.zip`]),
+  },
+  {
+    id: 'pl',
+    name: 'Pologne',
+    flag: '🇵🇱',
+    tz: 'Europe/Warsaw',
+    // Flux maintenus par mkuran.pl : PKP Intercity, Polregio, Koleje Mazowieckie.
+    sources: [[
+      'https://mkuran.pl/gtfs/pkpic.zip',
+      'https://mkuran.pl/gtfs/polregio.zip',
+      'https://mkuran.pl/gtfs/kolejemazowieckie.zip',
+    ]],
+  },
+  {
+    id: 'dk',
+    name: 'Danemark',
+    flag: '🇩🇰',
+    tz: 'Europe/Copenhagen',
+    sources: [['https://www.rejseplanen.info/labs/GTFS.zip'], ['http://www.rejseplanen.info/labs/GTFS.zip']],
+  },
+  {
+    id: 'no',
+    name: 'Norvège',
+    flag: '🇳🇴',
+    tz: 'Europe/Oslo',
+    sources: [['https://storage.googleapis.com/marduk-production/outbound/gtfs/rb_norway-aggregated-gtfs.zip']],
+  },
+  {
+    id: 'fi',
+    name: 'Finlande',
+    flag: '🇫🇮',
+    tz: 'Europe/Helsinki',
+    sources: [['https://rata.digitraffic.fi/api/v1/trains/gtfs-all.zip']],
+  },
+  {
+    id: 'ee',
+    name: 'Estonie',
+    flag: '🇪🇪',
+    tz: 'Europe/Tallinn',
+    sources: [['https://peatus.ee/gtfs/gtfs.zip'], ['http://peatus.ee/gtfs/gtfs.zip']],
+  },
+  {
+    id: 'hu',
+    name: 'Hongrie',
+    flag: '🇭🇺',
+    tz: 'Europe/Budapest',
+    sources: [['https://www.mavcsoport.hu/gtfs/gtfsMavMenetrend.zip']],
+  },
+  {
+    id: 'ie',
+    name: 'Irlande',
+    flag: '🇮🇪',
+    tz: 'Europe/Dublin',
+    sources: [['https://www.transportforireland.ie/transitData/Data/GTFS_Irish_Rail.zip']],
+  },
 ];
+
+// Alternatives pour un flux dont l'URL dépend de l'année d'horaire (en cours, suivante, précédente).
+function yearly(urlsFor) {
+  const y = new Date().getFullYear();
+  return [y, y + 1, y - 1].map(urlsFor);
+}
 
 function swissSources() {
   const y = new Date().getFullYear();
@@ -107,10 +174,19 @@ function swissSources() {
 // Catégories de trains (pour les couleurs et les filtres)
 
 const CATEGORY_RULES = [
-  ['hs', /^(TGV|OUIGO$|ICE|AVE$|AVLO$|IRYO|LYRIA|EUROSTAR|THALYS|ECE$|FRECCIA|RJX$)/i],
-  ['gl', /^(INTERCIT|IC$|EC$|EN$|NJ$|NIGHTJET|IR$|ICN$|ICD$|ALVIA|EUROMED|FLX$|D$|RJ$|INTERREGIO|LD$|TRENHOTEL|EUROCITY)/i],
-  ['sub', /^(S$|S-BAHN|SBAHN|RER|SN$|C$|TRANSILIEN|CERCAN|RODALIES|SPR$|SPRINTER)/i],
+  ['hs', /^(TGV|OUIGO$|ICE|AVE$|AVLO$|IRYO|LYRIA|EUROSTAR|THALYS|ECE$|FRECCIA|RJX$|EIP$|PENDOLINO)/i],
+  ['gl', /^(INTERCIT|IC$|EC$|EN$|NJ$|NIGHTJET|IR$|ICN$|ICD$|ALVIA|EUROMED|FLX$|D$|RJ$|INTERREGIO|LD$|TRENHOTEL|EUROCITY|EIC$|TLK$|IC-?L[YT]N$|SJ$|VY$)/i],
+  ['sub', /^(S$|S-BAHN|SBAHN|RER|SN$|C$|TRANSILIEN|CERCAN|RODALIES|SPR$|SPRINTER|DART|S-TOG|PENDELTÅG)/i],
 ];
+// Types de ligne étendus (101 grande vitesse, 102 grandes lignes…) : plus fiables que le nom.
+function categoryFromRouteType(t) {
+  if (t === 101) return 'hs';
+  if (t === 102 || t === 103 || t === 105) return 'gl';
+  if (t === 106) return 'reg';
+  if (t === 109) return 'sub';
+  return null;
+}
+
 function category(type) {
   const t = type.trim();
   if (/^OUIGO TRAIN CLASSIQUE/i.test(t)) return 'gl';
@@ -132,7 +208,7 @@ function sncfType(stopId, route, agencyName) {
 // Cas général : préfixe alphabétique du nom court de la ligne (« ICE 23 » → ICE,
 // « RE1 » → RE, « S 3 » → S), sinon description de la ligne, sinon l'opérateur.
 function genericType(stopId, route, agencyName) {
-  for (const s of [route.route_short_name, route.route_desc, route.route_long_name]) {
+  for (const s of [route.route_short_name, route.route_desc]) {
     const m = /^\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ-]*)/.exec(s || '');
     if (m && m[1].length <= 14) return m[1].length <= 4 ? m[1].toUpperCase() : m[1];
   }
@@ -144,7 +220,11 @@ function genericType(stopId, route, agencyName) {
 
 async function download(url) {
   console.log(`  ↓ ${url}`);
-  const res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'train-view (GTFS)' } });
+  const res = await fetch(url, {
+    redirect: 'follow',
+    headers: { 'User-Agent': 'train-view (GTFS)' },
+    signal: AbortSignal.timeout(5 * 60 * 1000),
+  });
   if (!res.ok) throw new Error(`${url} : HTTP ${res.status}`);
   const buf = new Uint8Array(await res.arrayBuffer());
   if (buf[0] !== 0x50 || buf[1] !== 0x4b) throw new Error(`${url} : ce n'est pas un fichier zip`);
@@ -277,14 +357,17 @@ async function loadFeeds(country) {
   }
   let lastError;
   for (const urls of country.sources) {
-    try {
-      const feeds = [];
-      for (const url of urls) feeds.push({ name: url, zip: await download(url) });
-      return feeds;
-    } catch (err) {
-      console.warn(`  échec : ${err.message}`);
-      lastError = err;
+    // Une alternative est retenue dès qu'au moins un de ses flux a pu être téléchargé.
+    const feeds = [];
+    for (const url of urls) {
+      try {
+        feeds.push({ name: url, zip: await download(url) });
+      } catch (err) {
+        console.warn(`  échec : ${err.message}`);
+        lastError = err;
+      }
     }
+    if (feeds.length) return feeds;
   }
   throw lastError;
 }
@@ -303,6 +386,7 @@ async function buildCountry(country) {
   const stopKeyIndex = new Map();
   const types = [];
   const typeIndex = new Map();
+  const typeCounts = [];
   const serviceKeys = new Map();
   const services = [];
   const trips = [];
@@ -315,7 +399,8 @@ async function buildCountry(country) {
 
     const routes = new Map();
     readCsv(zip, 'routes.txt', (f, h) => {
-      if (keepRoute(Number(col(f, h, 'route_type')))) routes.set(col(f, h, 'route_id'), rowObj(f, h));
+      const rt = Number(col(f, h, 'route_type'));
+      if (keepRoute(rt)) routes.set(col(f, h, 'route_id'), { ...rowObj(f, h), rt });
     });
     if (!routes.size) {
       const typesSeen = {};
@@ -454,8 +539,11 @@ async function buildCountry(country) {
       if (seenTrips.has(dedupKey)) continue;
       seenTrips.add(dedupKey);
 
-      let ti = typeIndex.get(type);
-      if (ti === undefined) { ti = types.length; types.push(type); typeIndex.set(type, ti); }
+      const cat = categoryFromRouteType(route.rt) || category(type);
+      const typeKey = `${type}|${cat}`;
+      let ti = typeIndex.get(typeKey);
+      if (ti === undefined) { ti = types.length; types.push([type, cat]); typeIndex.set(typeKey, ti); typeCounts.push(0); }
+      typeCounts[ti]++;
       trips.push(line ? [number, ti, t.service, flat, line] : [number, ti, t.service, flat]);
       kept++;
     }
@@ -475,6 +563,9 @@ async function buildCountry(country) {
   }
 
   if (!trips.length) throw new Error('aucune course trouvée');
+  // Résumé des types trouvés, utile pour ajuster les catégories.
+  const summary = types.map((t, i) => [t, typeCounts[i]]).sort((a, b) => b[1] - a[1]).slice(0, 25);
+  console.log(`  types : ${summary.map(([[t, c], n]) => `${t} (${c}) ${n}`).join(', ')}`);
   return {
     id: country.id,
     name: country.name,
@@ -482,7 +573,7 @@ async function buildCountry(country) {
     generated: new Date().toISOString(),
     timezone: country.tz,
     dates,
-    types: types.map((t) => [t, category(t)]),
+    types,
     stops,
     services,
     trips,
