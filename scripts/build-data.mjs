@@ -279,6 +279,8 @@ async function main() {
 
       const number = (t.r.trip_short_name || t.r.trip_headsign || tripId).trim();
       const type = trainType(t.stops[0].stop_id, t.route, agencies.get(t.route.agency_id));
+      // Les flux SNCF classent certains autocars (« Car TER »…) comme des lignes ferroviaires.
+      if (/^car\b/i.test(type)) continue;
       // Les flux SNCF dupliquent parfois une même course (ex. train partagé entre deux régions).
       const dedupKey = `${number}|${t.service}|${flat.join(',')}`;
       if (seenTrips.has(dedupKey)) continue;

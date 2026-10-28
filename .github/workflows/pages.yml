@@ -1,8 +1,8 @@
 name: Déploiement GitHub Pages
 
 on:
+  # À chaque push : seule la branche par défaut du dépôt est déployée (voir `if` ci-dessous).
   push:
-    branches: [main]
   schedule:
     # Tous les jours à 3h17 UTC : on régénère les horaires.
     - cron: '17 3 * * *'
@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.ref_name == github.event.repository.default_branch || github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
