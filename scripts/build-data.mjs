@@ -203,6 +203,8 @@ class CsvStream {
     if (l.endsWith('\r')) l = l.slice(0, -1);
     if (!l) return;
     const fields = l.includes('"') ? splitQuoted(l) : l.split(',');
+    // Certains flux (Renfe Cercanías) complètent les champs avec des espaces.
+    if (l.includes(' ')) for (let i = 0; i < fields.length; i++) fields[i] = fields[i].trim();
     if (!this.header) {
       this.header = {};
       fields.forEach((h, i) => { this.header[h.trim()] = i; });
