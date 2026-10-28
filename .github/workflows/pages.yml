@@ -29,12 +29,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # Voies OpenStreetMap déjà téléchargées (le script les renouvelle au bout de 30 jours).
+      # Voies OpenStreetMap déjà préparées (renouvelées au bout de 30 jours par osm-rail.sh).
       - uses: actions/cache@v4
         with:
           path: .cache/osm-rail
-          key: osm-rail-${{ github.run_id }}
-          restore-keys: osm-rail-
+          key: osm-rail-v2-${{ github.run_id }}
+          restore-keys: osm-rail-v2-
+      - name: Voies OpenStreetMap (extraits Geofabrik)
+        run: |
+          sudo apt-get install -y -q osmium-tool
+          bash scripts/osm-rail.sh
       - name: Génération des horaires
         run: npm run data
       - uses: actions/upload-pages-artifact@v3

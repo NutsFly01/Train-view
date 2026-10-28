@@ -1,10 +1,11 @@
 // Géométrie des voies entre deux gares consécutives :
 //   1. découpe des tracés GTFS (shapes.txt) quand l'opérateur les fournit ;
-//   2. sinon, plus court chemin sur le réseau ferré OpenStreetMap (API Overpass) ;
+//   2. sinon, plus court chemin sur le réseau ferré OpenStreetMap (extraits Geofabrik) ;
 //   3. sinon, rien (le navigateur trace une ligne droite).
-// Les tuiles OSM téléchargées sont gardées en cache dans .cache/osm-rail (30 jours).
 
-import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 
 const R = 6371000;
@@ -69,75 +70,40 @@ export function cutShape(shape, stopsLatLon) {
 
 // ---------------------------------------------------------------------------
 // Réseau ferré OpenStreetMap
+//
+// Les voies viennent des extraits Geofabrik, filtrés par scripts/osm-rail.sh avec osmium :
+// un fichier OPL par région dans .cache/osm-rail, dont chaque ligne « w… » contient les
+// nœuds de la voie avec leurs coordonnées (« Nn12x2.35y48.85,n13x… »).
 
-const TILE = 1; // tuiles de 1° × 1°
 const CACHE_DIR = join(process.cwd(), '.cache', 'osm-rail');
-const CACHE_DAYS = 30;
-const OVERPASS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.private.coffee/api/interpreter',
-  'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-];
-let serverIdx = 0;
-// Budget de temps pour les téléchargements Overpass, tous pays confondus : au-delà, les tronçons
-// restants gardent la ligne droite (les tuiles déjà téléchargées restent en cache pour la suite).
-const BUDGET_MS = Number(process.env.OSM_BUDGET_MIN || 70) * 60 * 1000;
-const startedAt = Date.now();
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function overpass(query) {
-  let lastErr;
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const url = OVERPASS[serverIdx % OVERPASS.length];
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'train-view (rail geometry)' },
-        body: `data=${encodeURIComponent(query)}`,
-        signal: AbortSignal.timeout(240 * 1000),
-      });
-      if (res.ok) {
-        const json = await res.json();
-        // Une requête interrompue côté serveur renvoie 200 avec une remarque d'erreur.
-        if (json.remark && /error|timed out|out of memory/i.test(json.remark)) throw new Error(`${url} : ${json.remark}`);
-        return json;
-      }
-      lastErr = new Error(`${url} : HTTP ${res.status}`);
-    } catch (err) {
-      lastErr = err;
-    }
-    serverIdx++;
-    await sleep(Math.min(30000, 2000 * 2 ** attempt));
-  }
-  throw lastErr;
-}
-
-// Télécharge (ou lit en cache) les voies d'une tuile : [{ id, nodes: [id…], geom: [lat, lon, lat, lon…] }].
-async function loadTile(tx, ty) {
-  const file = join(CACHE_DIR, `${ty}_${tx}.json`);
+async function loadRegion(graph, region) {
+  const file = join(CACHE_DIR, `${region.replace(/\//g, '_')}.opl`);
   try {
-    const st = await stat(file);
-    if (Date.now() - st.mtimeMs < CACHE_DAYS * 86400000) return JSON.parse(await readFile(file, 'utf8'));
+    await stat(file);
   } catch {
-    // Pas en cache : on télécharge.
+    return false;
   }
-  if (Date.now() - startedAt > BUDGET_MS) throw new Error('budget de temps OSM épuisé');
-  const s = ty * TILE;
-  const w = tx * TILE;
-  const query = `[out:json][timeout:200];way["railway"~"^(rail|light_rail|narrow_gauge)$"](${s},${w},${s + TILE},${w + TILE});out skel geom qt;`;
-  const json = await overpass(query);
-  const ways = [];
-  for (const el of json.elements || []) {
-    if (el.type !== 'way' || !el.geometry || !el.nodes) continue;
+  const rl = createInterface({ input: createReadStream(file), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (line.charCodeAt(0) !== 119) continue; // « w »
+    const sp = line.indexOf(' ');
+    const id = Number(line.slice(1, sp));
+    const n = line.indexOf(' N');
+    if (n < 0) continue;
+    const refs = line.slice(n + 2).split(' ')[0].split(',');
+    const nodes = [];
     const geom = [];
-    for (const g of el.geometry) geom.push(+g.lat.toFixed(6), +g.lon.toFixed(6));
-    ways.push({ id: el.id, nodes: el.nodes, geom });
+    for (const r of refs) {
+      const x = r.indexOf('x');
+      const y = r.indexOf('y');
+      if (x < 0 || y < 0 || y === x + 1) continue; // position inconnue
+      nodes.push(Number(r.slice(1, x)));
+      geom.push(Number(r.slice(y + 1)), Number(r.slice(x + 1, y)));
+    }
+    if (nodes.length > 1) graph.addWays([{ id, nodes, geom }]);
   }
-  await mkdir(CACHE_DIR, { recursive: true });
-  await writeFile(file, JSON.stringify(ways));
-  return ways;
+  return true;
 }
 
 class RailGraph {
@@ -274,46 +240,27 @@ class MinHeap {
   }
 }
 
-// Calcule les tracés OSM des tronçons `pairs` ([[a, b], …], indices dans `stops`).
-// Renvoie une Map "a,b" -> polyligne. Les tronçons trop longs ou introuvables sont ignorés.
-export async function routeOnOsm(pairs, stops, log = console.log) {
+// Calcule les tracés OSM des tronçons `pairs` ([[a, b], …], indices dans `stops`) sur les voies
+// des régions Geofabrik `regions`. Renvoie une Map "a,b" -> polyligne ; les tronçons trop
+// longs ou introuvables sont ignorés.
+export async function routeOnOsm(pairs, stops, regions, log = console.log) {
   const result = new Map();
-  if (!pairs.length) return result;
-  const MAX_KM = 400;
-
-  // Tuiles nécessaires : rectangle englobant de chaque tronçon, avec une marge.
-  const tiles = new Set();
-  const usable = [];
-  for (const [a, b] of pairs) {
-    const A = stops[a];
-    const B = stops[b];
-    const d = distance(A[1], A[2], B[1], B[2]);
-    if (d < 300 || d > MAX_KM * 1000) continue;
-    usable.push([a, b]);
-    const pad = 0.05;
-    for (let y = Math.floor((Math.min(A[1], B[1]) - pad) / TILE); y <= Math.floor((Math.max(A[1], B[1]) + pad) / TILE); y++) {
-      for (let x = Math.floor((Math.min(A[2], B[2]) - pad) / TILE); x <= Math.floor((Math.max(A[2], B[2]) + pad) / TILE); x++) {
-        tiles.add(`${x},${y}`);
-      }
-    }
-  }
-  log(`  voies OSM : ${tiles.size} tuiles pour ${usable.length} tronçons`);
+  if (!pairs.length || !regions?.length) return result;
+  const MAX_KM = 600;
+  const usable = pairs.filter(([a, b]) => {
+    const d = distance(stops[a][1], stops[a][2], stops[b][1], stops[b][2]);
+    return d >= 300 && d <= MAX_KM * 1000;
+  });
 
   const graph = new RailGraph();
-  let loaded = 0;
-  let failed = 0;
   const started = Date.now();
-  for (const t of tiles) {
-    const [x, y] = t.split(',').map(Number);
-    try {
-      graph.addWays(await loadTile(x, y));
-    } catch (err) {
-      failed++;
-      log(`    tuile ${y},${x} indisponible : ${err.message}`);
-    }
-    if (++loaded % 25 === 0) log(`    ${loaded}/${tiles.size} tuiles (${Math.round((Date.now() - started) / 1000)} s)`);
+  const loaded = [];
+  for (const region of regions) if (await loadRegion(graph, region)) loaded.push(region);
+  if (!loaded.length) {
+    log(`  voies OSM : aucun extrait disponible (${regions.join(', ')}) — lancez scripts/osm-rail.sh`);
+    return result;
   }
-  log(`  graphe ferré : ${graph.lat.length} nœuds${failed ? `, ${failed} tuiles manquantes` : ''}`);
+  log(`  voies OSM : ${graph.lat.length} nœuds (${loaded.join(', ')}) en ${Math.round((Date.now() - started) / 1000)} s`);
 
   let ok = 0;
   for (const [a, b] of usable) {
@@ -329,7 +276,7 @@ export async function routeOnOsm(pairs, stops, log = console.log) {
     result.set(`${a},${b}`, pts);
     ok++;
   }
-  log(`  tracés OSM trouvés : ${ok}/${usable.length}`);
+  log(`  tracés OSM trouvés : ${ok}/${usable.length} (${Math.round((Date.now() - started) / 1000)} s)`);
   return result;
 }
 

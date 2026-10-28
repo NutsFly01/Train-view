@@ -8,7 +8,8 @@
 //   GTFS_FILES="a.zip b.zip" COUNTRIES=fr node scripts/build-data.mjs   # fichiers locaux
 //   GTFS_FILES="fr:a.zip de:b.zip" COUNTRIES="fr de" node scripts/build-data.mjs
 //   DAYS=3 node scripts/build-data.mjs              # jours couverts à partir d'aujourd'hui
-//   OSM=0 node scripts/build-data.mjs               # sans tracés OpenStreetMap (plus rapide)
+//   OSM=0 node scripts/build-data.mjs               # sans tracés OpenStreetMap
+//   bash scripts/osm-rail.sh                         # prépare les voies OSM (nécessite osmium)
 //
 // Un pays dont le flux est indisponible est ignoré (avec un avertissement) : les autres
 // sont quand même publiés.
@@ -29,6 +30,8 @@ const RAIL = (t) => t === 2 || (t >= 100 && t < 200);
 const COUNTRIES = [
   {
     id: 'fr',
+    // Extraits Geofabrik dont on tire les voies pour les tronçons sans tracé GTFS.
+    osm: ['europe/france', 'europe/belgium', 'europe/luxembourg', 'europe/switzerland'],
     name: 'France',
     flag: '🇫🇷',
     tz: 'Europe/Paris',
@@ -46,6 +49,8 @@ const COUNTRIES = [
   },
   {
     id: 'de',
+    // Extraits Geofabrik dont on tire les voies pour les tronçons sans tracé GTFS.
+    osm: ['europe/germany'],
     name: 'Allemagne',
     flag: '🇩🇪',
     tz: 'Europe/Berlin',
@@ -57,6 +62,8 @@ const COUNTRIES = [
   },
   {
     id: 'ch',
+    // Extraits Geofabrik dont on tire les voies pour les tronçons sans tracé GTFS.
+    osm: ['europe/switzerland'],
     name: 'Suisse',
     flag: '🇨🇭',
     tz: 'Europe/Zurich',
@@ -66,6 +73,8 @@ const COUNTRIES = [
   },
   {
     id: 'be',
+    // Extraits Geofabrik dont on tire les voies pour les tronçons sans tracé GTFS.
+    osm: ['europe/belgium', 'europe/luxembourg'],
     name: 'Belgique',
     flag: '🇧🇪',
     tz: 'Europe/Brussels',
@@ -80,6 +89,8 @@ const COUNTRIES = [
   },
   {
     id: 'es',
+    // Extraits Geofabrik dont on tire les voies pour les tronçons sans tracé GTFS.
+    osm: ['europe/spain'],
     name: 'Espagne',
     flag: '🇪🇸',
     tz: 'Europe/Madrid',
@@ -119,6 +130,8 @@ const COUNTRIES = [
   },
   {
     id: 'no',
+    // Extraits Geofabrik dont on tire les voies pour les tronçons sans tracé GTFS.
+    osm: ['europe/norway'],
     name: 'Norvège',
     flag: '🇳🇴',
     tz: 'Europe/Oslo',
@@ -126,10 +139,13 @@ const COUNTRIES = [
   },
   {
     id: 'fi',
+    // Extraits Geofabrik dont on tire les voies pour les tronçons sans tracé GTFS.
+    osm: ['europe/finland'],
     name: 'Finlande',
     flag: '🇫🇮',
     tz: 'Europe/Helsinki',
-    sources: [['https://rata.digitraffic.fi/api/v1/trains/gtfs-all.zip']],
+    // Deux essais : le téléchargement est parfois tronqué.
+    sources: [['https://rata.digitraffic.fi/api/v1/trains/gtfs-all.zip'], ['https://rata.digitraffic.fi/api/v1/trains/gtfs-all.zip']],
     // Le flux contient aussi les trains de marchandises et de service.
     excludeTypes: /^(T|VET|VEV|SAA|PAI|W|TYO|V|MUV|LIV|RV|MV|KUV|PAR)$/,
     categories: { S: 'hs', AE: 'hs', IC: 'gl', PYO: 'gl' },
@@ -791,7 +807,7 @@ async function buildFromFeeds(country, feeds) {
     }
   }
   if (missing.size && process.env.OSM !== '0') {
-    for (const [key, pts] of await routeOnOsm([...missing.values()], stops)) segGeom.set(key, pts);
+    for (const [key, pts] of await routeOnOsm([...missing.values()], stops, country.osm)) segGeom.set(key, pts);
   }
   const segs = encodeSegments(segGeom);
   console.log(`  tracés : ${Object.keys(segs).length} tronçons sur voies réelles`);
@@ -873,6 +889,11 @@ function encodeSegments(segGeom) {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  // Liste des extraits Geofabrik utiles (lue par scripts/osm-rail.sh).
+  if (process.argv.includes('--osm-regions')) {
+    console.log([...new Set(COUNTRIES.flatMap((c) => c.osm || []))].join('\n'));
+    return;
+  }
   const wanted = process.env.COUNTRIES ? process.env.COUNTRIES.split(/[\s,]+/).filter(Boolean) : null;
   const list = COUNTRIES.filter((c) => !wanted || wanted.includes(c.id));
   if (process.env.GTFS_FILES && list.length !== 1 && !/(^|\s)[a-z]{2}(-[a-z]+)?:/.test(process.env.GTFS_FILES)) {
